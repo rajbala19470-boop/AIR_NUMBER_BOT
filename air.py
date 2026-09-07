@@ -160,11 +160,40 @@ COUNTRY_CODE_MAP = load_country_code_map()
 GLOBAL_BODY_EMOJIS = load_global_emojis()
 PREMIUM_APPS = load_premium_apps()
 
-# Helper for emoji replacement in text
-def apply_emojis(text):
-    for char, eid in GLOBAL_BODY_EMOJIS.items():
-        text = text.replace(char, f'<tg-emoji emoji-id="{eid}">{char}</tg-emoji>')
+# ================= SAFE HTML PIPELINE =================
+def _protect_tg_emoji_tags(text):
+    """Replace all <tg-emoji> tags with placeholders and return the list of tags."""
+    pattern = re.compile(r'<tg-emoji[^>]*>.*?</tg-emoji>', re.DOTALL)
+    tags = pattern.findall(text)
+    for i, tag in enumerate(tags):
+        placeholder = f"__TG_EMOJI_{i}__"
+        text = text.replace(tag, placeholder, 1)
+    return text, tags
+
+def _restore_tg_emoji_tags(text, tags):
+    for i, tag in enumerate(tags):
+        placeholder = f"__TG_EMOJI_{i}__"
+        text = text.replace(placeholder, tag)
     return text
+
+def apply_emojis(text):
+    """
+    Safely replace normal country flags with <tg-emoji> tags
+    without double-wrapping existing tags.
+    """
+    if not text:
+        return text
+    # Protect existing tg-emoji tags
+    protected_text, protected_tags = _protect_tg_emoji_tags(text)
+    # Replace flag characters
+    for flag, eid in GLOBAL_BODY_EMOJIS.items():
+        if flag in protected_text:
+            protected_text = protected_text.replace(
+                flag,
+                f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
+            )
+    # Restore protected tags
+    return _restore_tg_emoji_tags(protected_text, protected_tags)
 
 # ================= EMOJIS (PREMIUM – from constants) =================
 WELCOME_WAVE = "5199885118214255386"
@@ -523,6 +552,27 @@ def get_country_code(country_name):
             return iso
     return country_name.upper()[:2]
 
+def get_country_flag_html(country_name):
+    """Return <tg-emoji> tag for country flag, fallback to plain flag."""
+    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
+        if name.lower() == country_name.lower():
+            eid = GLOBAL_BODY_EMOJIS.get(flag)
+            if eid:
+                return f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
+            return flag
+    # fallback: try to find by iso
+    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
+        if iso.lower() == country_name.lower():
+            eid = GLOBAL_BODY_EMOJIS.get(flag)
+            if eid:
+                return f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
+            return flag
+    return "🏳️"
+
+def country_flag_emoji(country_name: str) -> str:
+    # Reuse the HTML helper
+    return get_country_flag_html(country_name)
+
 # ================= LANGUAGE DETECTION =================
 def detect_language(text):
     try:
@@ -656,8 +706,11 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     first4 = clean_number[:4] if len(clean_number) >= 4 else clean_number
     last3 = clean_number[-3:] if len(clean_number) >= 3 else clean_number
 
+    # Use get_country_flag_html to get premium flag if exists
+    flag_html = get_country_flag_html(name)
+
     text = (
-        f"{flag}<b>{iso}</b> | "
+        f"{flag_html}<b>{iso}</b> | "
         f'<tg-emoji emoji-id="{service_emoji_id}">{service_emoji}</tg-emoji> | '
         f"+<b>{first4}</b><tg-emoji emoji-id=\"{HIDDEN_EMOJI}\">🔹</tg-emoji><b>{last3}</b> | "
         f'<tg-emoji emoji-id="{MESSAGE_EMOJI}">✉️</tg-emoji> <b>{lang}</b>'
@@ -702,6 +755,8 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
     service_html, srv_eid = get_service_info_html(service_name)
     clean_raw_number = str(raw_number).lstrip('+')
+    # Use flag HTML
+    flag_html = get_country_flag_html(get_country_from_number(raw_number) or "Unknown")
     text = (
         f"— — — — — — — — — —\n"
         f"<blockquote>{service_html} <code>+{clean_raw_number}</code></blockquote>\n"
@@ -762,7 +817,7 @@ def ensure_user(user_id, username, first_name):
                VALUES (?, ?, ?, ?, ?)''',
             (user_id, username, first_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-# ... (other helper functions like extract_country_from_filename etc. remain unchanged, but they should use the new COUNTRY_CODE_MAP when needed - we keep them as is since they rely on COUNTRIES_DATA which is separate)
+# ... (other helper functions like extract_country_from_filename etc. remain unchanged)
 
 # ================= BOT SETTINGS =================
 def get_bot_setting(key, default=None):
@@ -888,18 +943,6 @@ DEFAULT_EMOJIS = {
     }
 }
 
-def country_flag_emoji(country_name: str) -> str:
-    # First try GLOBAL_BODY_EMOJIS by flag, but we need flag from COUNTRY_CODE_MAP
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if name.lower() == country_name.lower():
-            eid = GLOBAL_BODY_EMOJIS.get(flag)
-            if eid:
-                return emoji_tag(eid, flag)
-            return flag
-    # fallback
-    eid = get_country_info(country_name).get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
-    return emoji_tag(eid, "🏁")
-
 def service_emoji_tag(service_name: str) -> str:
     row = db_fetch_one("SELECT emoji_id FROM services WHERE LOWER(name) = LOWER(?)", (service_name,))
     eid = row[0] if row and row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
@@ -914,7 +957,7 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
         row = db_fetch_one("SELECT remove_cc FROM users WHERE user_id=?", (user_id,))
         if row:
             remove_cc = row[0] or 0
-    flag_eid = get_country_info(country).get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
+    flag_html = get_country_flag_html(country)
     country_code = get_country_info(country).get("code", "")
     service_eid_row = db_fetch_one("SELECT emoji_id FROM services WHERE LOWER(name) = LOWER(?)", (service,))
     service_eid = service_eid_row[0] if service_eid_row and service_eid_row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
@@ -922,7 +965,7 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
     header = (
         f'{emoji_tag(HEADER_EMOJI_1, "⚙️")} <b>THIS IS YOUR</b> '
         f'{emoji_tag(HEADER_EMOJI_2, "📱")} <b>{country.upper()}</b> '
-        f'{country_flag_emoji(country)} <b>NUMBERS</b> {emoji_tag(phone_icon_id, "📱")}\n\n'
+        f'{flag_html} <b>NUMBERS</b> {emoji_tag(phone_icon_id, "📱")}\n\n'
     )
     rows = []
     # Get flag from COUNTRY_CODE_MAP
@@ -966,7 +1009,7 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
     return header, InlineKeyboardMarkup(rows)
 
 def stock_added_message(country, service, count):
-    flag_eid = get_country_info(country).get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
+    flag_html = get_country_flag_html(country)
     svc_eid_row = db_fetch_one("SELECT emoji_id FROM services WHERE name = ?", (service,))
     svc_eid = svc_eid_row[0] if svc_eid_row and svc_eid_row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
     payout = get_country_info(country).get("payout", "0.001$")
@@ -983,7 +1026,7 @@ def stock_added_message(country, service, count):
         f'{emoji_tag(EMOJI_PACKAGE, "📦")} <b>ADDED SUCCESSFULLY</b> '
         f'{emoji_tag(EMOJI_CHECK, "✅")}\n\n'
         f'<b>NUMBER</b> {emoji_tag(EMOJI_NUMBER, "📱")} : <code>{count}</code>\n'
-        f'<b>COUNTRY</b> {emoji_tag(EMOJI_COUNTRY, "🌍")} : {emoji_tag(flag_eid, "🏁")} <b>{country}</b>\n'
+        f'<b>COUNTRY</b> {emoji_tag(EMOJI_COUNTRY, "🌍")} : {flag_html} <b>{country}</b>\n'
         f'<b>SERVICE</b> {emoji_tag(EMOJI_SERVICE, "🔧")} : {emoji_tag(svc_eid, "⚙️")} <b>{service}</b>\n'
         f'<b>PAYOUT</b> {emoji_tag(EMOJI_PAYOUT, "💰")} : <code>{payout}</code> {emoji_tag(EMOJI_COIN, "🪙")}'
     )
@@ -1062,15 +1105,14 @@ def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
         return back_to_main_keyboard()
     rows = []
     for name, stock in countries:
-        info = get_country_info(name)
-        flag_eid = info.get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
-        payout = info.get("payout", "0.001$")
+        flag_html = get_country_flag_html(name)
+        payout = get_country_info(name).get("payout", "0.001$")
         label = f"{name} — {payout} — ({stock})"
         rows.append([InlineKeyboardButton(
             label,
             callback_data=f"cnt_sel|{name}|{service}",
             style=KBS.SUCCESS,
-            icon_custom_emoji_id=safe_icon(flag_eid)
+            icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else ''))
         )])
     rows.append([InlineKeyboardButton("Back to Services", callback_data="menu_get_number", style=KBS.PRIMARY,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
@@ -1381,7 +1423,7 @@ def force_join_alert_keyboard():
         if not url and ch.get('username'):
             url = f"https://t.me/{ch['username'].replace('@', '')}"
         kb_rows.append([InlineKeyboardButton(f"JOIN {name}", url=url, style=KBS.PRIMARY)])
-    kb_rows.append([InlineKeyboardButton("✅ I HAVE JOINED", callback_data="check_fj_joined", style=KBS.SUCCESS,
+    kb_rows.append([InlineKeyboardButton("I HAVE JOINED", callback_data="check_fj_joined", style=KBS.SUCCESS,
                                          icon_custom_emoji_id=safe_icon("5352694861990501856"))])
     return InlineKeyboardMarkup(kb_rows)
 
@@ -1407,7 +1449,7 @@ async def ensure_persistent_welcome(context: ContextTypes.DEFAULT_TYPE, user_id:
             await context.bot.edit_message_text(
                 chat_id=user_id,
                 message_id=row[0],
-                text=welcome_html,
+                text=apply_emojis(welcome_html),
                 reply_markup=bottom_menu_keyboard(user_id),
                 parse_mode='HTML'
             )
@@ -1419,7 +1461,7 @@ async def ensure_persistent_welcome(context: ContextTypes.DEFAULT_TYPE, user_id:
                 pass
     sent = await context.bot.send_message(
         chat_id=user_id,
-        text=welcome_html,
+        text=apply_emojis(welcome_html),
         reply_markup=bottom_menu_keyboard(user_id),
         parse_mode='HTML'
     )
@@ -1437,11 +1479,12 @@ def start_welcome_html():
 # ================= SEND MESSAGES =================
 async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, parse_mode=None, auto_delete: bool = False, delete_after: int = None):
     user_id = update.effective_user.id
+    text = apply_emojis(text)
     try:
-        sent = await context.bot.send_message(chat_id=user_id, text=apply_emojis(text), reply_markup=reply_markup, parse_mode=parse_mode)
+        sent = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if "Entity_text_invalid" in str(e) or "Parse" in str(e):
-            sent = await context.bot.send_message(chat_id=user_id, text=apply_emojis(text), reply_markup=reply_markup)
+            sent = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
         else:
             raise
     db_exec("UPDATE users SET last_bot_message_id=? WHERE user_id=?", (sent.message_id, user_id))
@@ -1453,6 +1496,7 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")} <b>Main Menu</b>'
+    main_text = apply_emojis(main_text)  # safe (no flags)
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1460,8 +1504,9 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
 
 async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse_mode=None, context: ContextTypes.DEFAULT_TYPE = None, auto_delete: bool = False, delete_after: int = None):
     user_id = query.from_user.id
+    text = apply_emojis(text)
     try:
-        await query.edit_message_text(apply_emojis(text), reply_markup=reply_markup, parse_mode=parse_mode)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         if delete_after:
             await schedule_delete(context, query.message.chat_id, query.message.message_id, delete_after)
         return None
@@ -1476,7 +1521,7 @@ async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse
             try:
                 sent = await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=apply_emojis(text),
+                    text=text,
                     reply_markup=reply_markup
                 )
             except:
@@ -1494,6 +1539,7 @@ async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse
         return None
 
 async def reply_or_edit(target, text: str, reply_markup=None, parse_mode=None, context: ContextTypes.DEFAULT_TYPE = None, auto_delete: bool = False, delete_after: int = None):
+    text = apply_emojis(text)
     if isinstance(target, CallbackQuery):
         await edit_or_send(target, text, reply_markup=reply_markup, parse_mode=parse_mode, context=context, auto_delete=auto_delete, delete_after=delete_after)
     elif hasattr(target, 'callback_query') and target.callback_query:
@@ -1503,9 +1549,9 @@ async def reply_or_edit(target, text: str, reply_markup=None, parse_mode=None, c
             await send_clean_message(target, context, text, reply_markup=reply_markup, parse_mode=parse_mode, auto_delete=auto_delete, delete_after=delete_after)
         else:
             if hasattr(target, 'message'):
-                await target.message.reply_text(apply_emojis(text), reply_markup=reply_markup, parse_mode=parse_mode)
+                await target.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
             elif hasattr(target, 'edit_message_text'):
-                await target.edit_message_text(apply_emojis(text), reply_markup=reply_markup, parse_mode=parse_mode)
+                await target.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1549,9 +1595,9 @@ async def ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.edit_message_text(text, reply_markup=support_keyboard(), parse_mode='HTML')
+            await update.callback_query.edit_message_text(apply_emojis(text), reply_markup=support_keyboard(), parse_mode='HTML')
         else:
-            await update.message.reply_text(text, reply_markup=support_keyboard(), parse_mode='HTML')
+            await update.message.reply_text(apply_emojis(text), reply_markup=support_keyboard(), parse_mode='HTML')
         return True
     if get_force_join_status() and not is_admin(user_id):
         channels = get_force_join_channels()
@@ -1560,7 +1606,6 @@ async def ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id = ch.get('id')
             if chat_id:
                 try:
-                    # Use async bot method instead of requests
                     member = await context.bot.get_chat_member(chat_id, user_id)
                     if member.status in ['left', 'kicked']:
                         joined = False
@@ -1572,13 +1617,13 @@ async def ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if update.callback_query:
                 await update.callback_query.answer()
                 await update.callback_query.edit_message_text(
-                    "⚠️ <b>Please join our channels to use the bot!</b>",
+                    apply_emojis("⚠️ <b>Please join our channels to use the bot!</b>"),
                     reply_markup=force_join_alert_keyboard(),
                     parse_mode='HTML'
                 )
             else:
                 await update.message.reply_text(
-                    "⚠️ <b>Please join our channels to use the bot!</b>",
+                    apply_emojis("⚠️ <b>Please join our channels to use the bot!</b>"),
                     reply_markup=force_join_alert_keyboard(),
                     parse_mode='HTML'
                 )
@@ -1705,7 +1750,12 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
 async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    method = query.data[14:]
+    method = query.data[14:]  # "user_withdraw_{method}"
+    # Check W.GROUP immediately
+    w_group = get_setting("w_group", "")
+    if not w_group:
+        await query.answer("WITHDRAW IS NOW NOT AVAILABLE 🫡", show_alert=True)
+        return
     user_data = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (user_id,))
     if not user_data:
         await query.answer("User not found.", show_alert=True)
@@ -1796,14 +1846,14 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
         )
         w_markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("APPROVE", callback_data=f"admin_w_approve_{request_id}", style=KBS.SUCCESS,
+                InlineKeyboardButton("APPROVE", callback_data=f"admin_w_approve|{request_id}", style=KBS.SUCCESS,
                                      icon_custom_emoji_id=safe_icon(SUCCESS_EMOJI)),
-                InlineKeyboardButton("REJECT", callback_data=f"admin_w_reject_{request_id}", style=KBS.DANGER,
+                InlineKeyboardButton("REJECT", callback_data=f"admin_w_reject|{request_id}", style=KBS.DANGER,
                                      icon_custom_emoji_id=safe_icon(DANGER_EMOJI))
             ]
         ])
         try:
-            await context.bot.send_message(chat_id=int(w_group), text=w_msg, reply_markup=w_markup, parse_mode='HTML')
+            await context.bot.send_message(chat_id=int(w_group), text=apply_emojis(w_msg), reply_markup=w_markup, parse_mode='HTML')
         except Exception as e:
             print(f"Failed to send to w_group: {e}")
     success_msg = (
@@ -1815,7 +1865,7 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
         f"<tg-emoji emoji-id=\"5337132498965010628\">📞</tg-emoji> <b>Number:</b> <code>{account_number}</code>\n"
         f"━━━━━━━━━━━━━━━━━"
     )
-    await update.message.reply_text(success_msg, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML')
+    await update.message.reply_text(apply_emojis(success_msg), reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML')
     if target_msg_id:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=target_msg_id)
@@ -1832,14 +1882,14 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
     if not is_super_admin(user_id):
         await query.answer("⚠️ Access Denied! You cannot perform this action.", show_alert=True)
         return
-    # data format: admin_w_approve_<request_id> or admin_w_reject_<request_id>
-    parts = data.split('_')
-    if len(parts) < 3:
+    # data format: admin_w_approve|request_id or admin_w_reject|request_id
+    parts = data.split('|')
+    if len(parts) != 2:
         await query.answer("Invalid request.", show_alert=True)
         return
-    action = parts[2]
+    action = parts[0].split('_')[2]  # 'approve' or 'reject'
     try:
-        request_id = int(parts[3])
+        request_id = int(parts[1])
     except:
         await query.answer("Invalid request ID.", show_alert=True)
         return
@@ -2156,7 +2206,7 @@ async def um_ban_toggle(query, user_id, context: ContextTypes.DEFAULT_TYPE):
                 f'{emoji_tag("6206077285720659346", "🚫")} <b>Now You Can\'t Use Me</b> {emoji_tag("6206003549722122915", "😢")}\n'
                 f'{emoji_tag("6206267591426578467", "📞")} <b>CONTACT TO SUPPORT ADMINS</b> {emoji_tag("6206319341487527808", "👨‍💼")}'
             )
-            await context.bot.send_message(target_uid, ban_text, reply_markup=support_keyboard(), parse_mode='HTML')
+            await context.bot.send_message(target_uid, apply_emojis(ban_text), reply_markup=support_keyboard(), parse_mode='HTML')
         except:
             pass
     else:
@@ -2165,7 +2215,7 @@ async def um_ban_toggle(query, user_id, context: ContextTypes.DEFAULT_TYPE):
                 f'{emoji_tag("6206508629286196237", "🎉")} <b>Congratulation Now You Can Use The Bot</b> {emoji_tag("6206479140040743133", "🥳")}\n'
                 f'{emoji_tag("6206503415195899956", "🔓")} <b>You Are Unbanned</b> {emoji_tag("6204251568137574946", "✅")}'
             )
-            await context.bot.send_message(target_uid, unban_text, parse_mode='HTML')
+            await context.bot.send_message(target_uid, apply_emojis(unban_text), parse_mode='HTML')
         except:
             pass
     user_data = db_fetch_one("SELECT user_id, first_name, username, balance, withdrawn, total_otp, banned, joined_date, last_active FROM users WHERE user_id=?", (target_uid,))
@@ -2264,12 +2314,12 @@ async def handle_all_documents(update: Update, context: ContextTypes.DEFAULT_TYP
                     reply_markup=admin_cancel_keyboard())
                 return
             msg = stock_added_message(country, service, count)
-            await update.message.reply_text(msg, parse_mode='HTML')
+            await update.message.reply_text(apply_emojis(msg), parse_mode='HTML')
             broadcast_msg, broadcast_kb = stock_added_broadcast_with_button(country, service, count)
             users = db_fetch_all("SELECT user_id FROM users")
             for u in users:
                 try:
-                    await context.bot.send_message(u[0], broadcast_msg, reply_markup=broadcast_kb, parse_mode='HTML')
+                    await context.bot.send_message(u[0], apply_emojis(broadcast_msg), reply_markup=broadcast_kb, parse_mode='HTML')
                     await asyncio.sleep(0.05)
                 except Exception:
                     continue
@@ -2360,12 +2410,12 @@ async def fu_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await edit_or_send(query, f"✅ {count} numbers loaded.\nNew service '{service}' detected.\nSend emoji ID or /skip.", reply_markup=admin_cancel_keyboard(), context=context, auto_delete=False)
             return
         msg = stock_added_message(country, service, count)
-        await edit_or_send(query, msg, parse_mode='HTML', context=context, auto_delete=False)
+        await edit_or_send(query, apply_emojis(msg), parse_mode='HTML', context=context, auto_delete=False)
         broadcast_msg, broadcast_kb = stock_added_broadcast_with_button(country, service, count)
         users = db_fetch_all("SELECT user_id FROM users")
         for u in users:
             try:
-                await context.bot.send_message(u[0], broadcast_msg, reply_markup=broadcast_kb, parse_mode='HTML')
+                await context.bot.send_message(u[0], apply_emojis(broadcast_msg), reply_markup=broadcast_kb, parse_mode='HTML')
                 await asyncio.sleep(0.05)
             except Exception:
                 pass
@@ -2699,12 +2749,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text:
             db_exec("UPDATE services SET emoji_id = ? WHERE name = ?", (text, service))
         msg = stock_added_message(country, service, count)
-        await update.message.reply_text(msg, parse_mode='HTML')
+        await update.message.reply_text(apply_emojis(msg), parse_mode='HTML')
         broadcast_msg, broadcast_kb = stock_added_broadcast_with_button(country, service, count)
         users = db_fetch_all("SELECT user_id FROM users")
         for u in users:
             try:
-                await context.bot.send_message(u[0], broadcast_msg, reply_markup=broadcast_kb, parse_mode='HTML')
+                await context.bot.send_message(u[0], apply_emojis(broadcast_msg), reply_markup=broadcast_kb, parse_mode='HTML')
                 await asyncio.sleep(0.05)
             except Exception:
                 continue
@@ -2807,7 +2857,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Invalid URL. Must start with http/https.")
         admin_panel_state[user_id] = "main"
-        await admin_panel_menu(update, user_id, context)
+        await admin_otp_group(update, context)  # return to OTP GROUP
         await send_with_main_keyboard(update, context, user_id, "✅ Main channel link updated.")
         return True
     return False
@@ -2846,7 +2896,7 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
-    sent_msg = await query.message.reply_text(msg, reply_markup=kb, parse_mode='HTML')
+    sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
 
 # ================= /testgroup COMMAND =================
@@ -2892,7 +2942,7 @@ async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed_groups = []
     for gid in GROUP_IDS:
         try:
-            await context.bot.send_message(chat_id=gid, text=grp_text, reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
+            await context.bot.send_message(chat_id=gid, text=apply_emojis(grp_text), reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
             success_count += 1
         except Exception as e:
             failed_groups.append(f"{gid} ({str(e)})")
@@ -2907,7 +2957,7 @@ async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply += f"📱 Number: {test_number}\n🔑 OTP: {test_otp}\n"
         if failed_groups:
             reply += "\n⚠️ Failed groups:\n" + "\n".join(f"• {g}" for g in failed_groups)
-    await update.message.reply_text(reply)
+    await update.message.reply_text(apply_emojis(reply))
 
 # ================= CALLBACK HANDLERS =================
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3026,7 +3076,7 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
-    sent_msg = await query.message.reply_text(msg, reply_markup=kb, parse_mode='HTML')
+    sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
     try:
         await query.delete_message()
@@ -3086,7 +3136,7 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
-    sent_msg = await query.message.reply_text(msg, reply_markup=kb, parse_mode='HTML')
+    sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
     try:
         await query.delete_message()
@@ -3179,10 +3229,10 @@ async def stock_remove_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     kb_buttons = []
     for country, service, stock in rows:
-        country_eid = get_country_info(country).get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
+        flag_html = get_country_flag_html(country)
         label = f"{country} — {service} (Stock: {stock})"
         cb_data = f"stock_remove_confirm|{country}|{service}"
-        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=KBS.DANGER, icon_custom_emoji_id=safe_icon(country_eid))])
+        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=KBS.DANGER, icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
     kb_buttons.append([InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await edit_or_send(query, "Select stock to remove:", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML', context=context, auto_delete=False)
 
@@ -3194,7 +3244,8 @@ async def stock_remove_confirm_callback(update: Update, context: ContextTypes.DE
         return
     await query.answer()
     _, country, service = query.data.split('|')
-    text = f'Do you want to remove all numbers for {country_flag_emoji(country)} <b>{country}</b> with service {service_emoji_tag(service)}?'
+    flag_html = get_country_flag_html(country)
+    text = f'Do you want to remove all numbers for {flag_html} <b>{country}</b> with service {service_emoji_tag(service)}?'
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("YES", callback_data=f"stock_remove_yes|{country}|{service}", style=KBS.SUCCESS, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("YES", "")))],
         [InlineKeyboardButton("NO", callback_data="stock_remove_no", style=KBS.DANGER, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("NO", "")))]
@@ -3236,7 +3287,8 @@ async def stock_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         lines = []
         for country, service, stock in rows:
             payout = get_country_info(country).get("payout", "0.001$")
-            line = f'{service_emoji_tag(service)}|{country_flag_emoji(country)}<b>{country}</b>|<code>{payout}</code>|{stock}'
+            flag_html = get_country_flag_html(country)
+            line = f'{service_emoji_tag(service)}|{flag_html}<b>{country}</b>|<code>{payout}</code>|{stock}'
             lines.append(line)
         text = "\n".join(lines)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))]])
@@ -3255,11 +3307,11 @@ async def stock_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     kb_buttons = []
     for country, service, active in rows:
-        country_eid = get_country_info(country).get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
+        flag_html = get_country_flag_html(country)
         label = f"{country} — {service}"
         cb_data = f"stock_toggle_do|{country}|{service}"
         style = KBS.SUCCESS if active else KBS.DANGER
-        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=style, icon_custom_emoji_id=safe_icon(country_eid))])
+        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=style, icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
     kb_buttons.append([InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await edit_or_send(query, "Select stock to toggle active status:", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML', context=context, auto_delete=False)
 
@@ -3307,7 +3359,8 @@ async def show_admin_stats(update: Update, user_id, context: ContextTypes.DEFAUL
     if countries:
         text += f'\n\n{emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")} STOCK DETAILS {emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")}:\n'
         for name, service, stock_count in countries:
-            text += f'In stock {country_flag_emoji(name)} {name} — {service_emoji_tag(service)}: {stock_count}\n'
+            flag_html = get_country_flag_html(name)
+            text += f'In stock {flag_html} {name} — {service_emoji_tag(service)}: {stock_count}\n'
     await reply_or_edit(update, text, reply_markup=admin_back_button(), parse_mode='HTML', context=context, auto_delete=False)
 
 async def show_delete_options(query, user_id, context: ContextTypes.DEFAULT_TYPE):
@@ -3317,7 +3370,8 @@ async def show_delete_options(query, user_id, context: ContextTypes.DEFAULT_TYPE
         return
     rows = []
     for name, service, stock_count in countries:
-        rows.append([InlineKeyboardButton(f"Delete {name} — {service} (Stock: {stock_count})",
+        flag_html = get_country_flag_html(name)
+        rows.append([InlineKeyboardButton(f"Delete {flag_html} {name} — {service} (Stock: {stock_count})",
                                           callback_data=f"admin_del|{name}|{service}",
                                           style=KBS.DANGER,
                                           icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("DELETE", "")))])
@@ -3601,7 +3655,8 @@ async def country_add_start(update: Update, user_id, context: ContextTypes.DEFAU
 async def country_list_show(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     lines = [f'ALL COUNTRIES {emoji_tag(CUSTOM_EMOJIS["CHANGE_COUNTRY"], "🌍")}', '']
     for name, info in COUNTRIES_DATA.items():
-        lines.append(f'• {country_flag_emoji(name)} {name}')
+        flag_html = get_country_flag_html(name)
+        lines.append(f'• {flag_html} {name}')
         lines.append(f'  Code: {info["code"]} | ISO: {info["iso"]} | Payout: {info.get("payout", "0.001$")} | Emoji ID: {info.get("emoji_id") or "Not set"}')
         lines.append('')
     await reply_or_edit(update, '\n'.join(lines), reply_markup=admin_back_button(), parse_mode='HTML', context=context, auto_delete=False)
@@ -3609,11 +3664,11 @@ async def country_list_show(update: Update, user_id, context: ContextTypes.DEFAU
 async def country_edit_select(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     rows = []
     for name, info in COUNTRIES_DATA.items():
-        icon = info.get("emoji_id") or CUSTOM_EMOJIS.get("DEFAULT_FLAG", "")
-        rows.append([InlineKeyboardButton(f"{name} (Payout: {info.get('payout','0.001$')})",
+        flag_html = get_country_flag_html(name)
+        rows.append([InlineKeyboardButton(f"{flag_html} {name} (Payout: {info.get('payout','0.001$')})",
                                           callback_data=f"country_edit|{name}",
                                           style=KBS.PRIMARY,
-                                          icon_custom_emoji_id=safe_icon(icon))])
+                                          icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
     rows.append([InlineKeyboardButton("Back", callback_data="admin_country_manager", style=KBS.PRIMARY,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await reply_or_edit(update, "Select country to edit:", reply_markup=InlineKeyboardMarkup(rows), context=context, auto_delete=False)
@@ -3629,7 +3684,8 @@ async def country_edit_start(update: Update, user_id, country_name, context: Con
 async def country_delete_select(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     rows = []
     for name in COUNTRIES_DATA:
-        rows.append([InlineKeyboardButton(f"Delete {name}", callback_data=f"country_delete|{name}",
+        flag_html = get_country_flag_html(name)
+        rows.append([InlineKeyboardButton(f"Delete {flag_html} {name}", callback_data=f"country_delete|{name}",
                                           style=KBS.DANGER,
                                           icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("DELETE", "")))])
     rows.append([InlineKeyboardButton("Back", callback_data="admin_country_manager", style=KBS.PRIMARY,
@@ -3916,7 +3972,7 @@ async def send_balance_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def send_support_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
-    sent_inline = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=support_keyboard())
+    sent_inline = await context.bot.send_message(chat_id=user_id, text=apply_emojis(text), reply_markup=support_keyboard())
     db_exec("UPDATE users SET last_bot_message_id=? WHERE user_id=?", (sent_inline.message_id, user_id))
 
 async def send_admin_panel_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4599,7 +4655,6 @@ async def poll_single_api_curl_based(api_id: int):
                             (api_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "OK", new_count))
                     db_exec("UPDATE api_keys SET error_count = 0, last_poll_time = ? WHERE id = ?",
                             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), api_id))
-                    # logging not defined, use print
                     print(f"[API: {config.get('panel_name', api_id)}] 🔄 Polling cycle #{cycle} – ✅ Success ({new_count} OTPs)")
                 else:
                     error_msg = f"HTTP {status}"
@@ -6314,7 +6369,8 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
     async def safe_send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
         async with semaphore:
             try:
-                await bot.send_message(chat_id=chat_id, text=apply_emojis(text), reply_markup=reply_markup, parse_mode=parse_mode)
+                text = apply_emojis(text)
+                await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
             except Exception as e:
                 print(f"Failed to send to {chat_id}: {e}")
 
@@ -6663,7 +6719,7 @@ def main():
     application.add_handler(CallbackQueryHandler(otp_select_group, pattern="^otp_select_group$"))
 
     application.add_handler(CallbackQueryHandler(user_withdraw_method, pattern=r"^user_withdraw_.+$"))
-    application.add_handler(CallbackQueryHandler(admin_withdraw_callback, pattern=r"^admin_w_(approve|reject)_\d+$"))
+    application.add_handler(CallbackQueryHandler(admin_withdraw_callback, pattern=r"^admin_w_(approve|reject)\|"))
 
     # This handler now receives all non‑command text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
