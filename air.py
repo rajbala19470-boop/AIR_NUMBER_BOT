@@ -99,7 +99,10 @@ def load_global_emojis():
         with open(path, 'w', encoding='utf-8') as f:
             f.write("# GLOBAL_EMOJI.txt\n# Format: flag|premium_emoji_id\n")
             f.write("🇧🇩|5911365056594973179\n")
-        mapping = {"🇧🇩": "5911365056594973179"}
+            f.write("🇺🇸|5913463998522592692\n")
+            f.write("🇬🇧|5913443365499703513\n")
+            f.write("🇮🇳|5913754823643107921\n")
+        mapping = {"🇧🇩": "5911365056594973179", "🇺🇸": "5913463998522592692", "🇬🇧": "5913443365499703513", "🇮🇳": "5913754823643107921"}
     except Exception as e:
         print(f"Error loading GLOBAL_EMOJI.txt: {e}")
         mapping = {"🇧🇩": "5911365056594973179"}
@@ -1562,7 +1565,7 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return sent
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")} <b>Main Menu</b>'
+    main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")}<b>Main Menu</b>'
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1764,11 +1767,15 @@ async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TY
         f'{emoji_tag(CUSTOM_EMOJIS["PROFILE_ICON"], "👤")} '
         f'<a href="tg://user?id={user_id}">{html.escape(first_name)}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
         f'------------------------------------------------\n'
-        f'{emoji_tag(emoji_id, "🆔")} USER ID: <code>{user_id}</code>\n'
-        f'{emoji_tag(emoji_money, "💰")} BALANCE: <code>${balance:.3f}</code>\n'
-        f'{emoji_tag(emoji_withdraw, "💸")} WITHDRAWED: <code>${withdrawn:.3f}</code>\n'
-        f'{emoji_tag(emoji_warning, "⚠️")} MINIMUM WITHDRAW: <code>${get_setting("min_withdraw", "10.0")}</code>\n'
-        f'{emoji_tag(emoji_inbox, "📨")} TOTAL OTP: <code>{total_otp}</code>'
+        f'{emoji_tag(emoji_id, "🆔")} <b>USER ID:</b>  <code>{user_id}</code>\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_money, "💰")} <b>BALANCE:</b> ${balance:.2f}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_withdraw, "💸")} <b>WITHDRAWED:</b>  ${withdrawn:.3f}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_warning, "⚠️")} <b>MINIMUM WITHDRAW:</b>  ${get_setting("min_withdraw", "10.0")}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_inbox, "📨")} <b>TOTAL OTP:</b>  {total_otp}'
     )
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("WITHDRAW", callback_data="withdraw", style=KBS.SUCCESS,
@@ -1788,16 +1795,16 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
     balance = balance[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        need = round(min_w - balance, 3)
-        text = (
-            f'{emoji_tag("4956611513369494230", "🔻")} YOUR MAIN BALANCE IS LOW{emoji_tag("4956387556594811916", "😞")}\n\n'
-            f'{emoji_tag("4958534696645428119", "⚠️")} MINIMUM WITHDRAW: ${min_w}\n'
-            f'{emoji_tag("4958926882994127612", "💰")} YOUR CURRENT BALANCE: ${balance:.3f}\n'
-            f'{emoji_tag("4958642964181025908", "🧾")} NEED: ${need:.3f}\n\n'
-            f'{emoji_tag("4958503072801228000", "📢")} KINDLY GRAB SOME OTP TO WITHDRAW YOU BALANCE {emoji_tag("4956721670690702265", "✅")}'
-        )
-        await reply_or_edit(update, text, reply_markup=None, context=context, auto_delete=False)
-        return
+        # Show popup alert instead of message
+        first_name = update.effective_user.first_name or "User"
+        alert_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need ${min_w} - ${balance:.2f} 💸 To Withdraw 👍🏻"
+        if isinstance(update, CallbackQuery):
+            await update.answer(alert_text, show_alert=True)
+            return
+        else:
+            # Fallback to message if not callback
+            await reply_or_edit(update, alert_text, context=context, auto_delete=False)
+            return
     methods = get_setting('w_methods', [])
     if not methods:
         await reply_or_edit(update, "❌ No withdraw methods configured by admin.", context=context, auto_delete=False)
@@ -1829,16 +1836,9 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     balance = user_data[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        # Show low balance message instead of alert
-        need = round(min_w - balance, 3)
-        text = (
-            f'{emoji_tag("4956611513369494230", "🔻")} YOUR MAIN BALANCE IS LOW{emoji_tag("4956387556594811916", "😞")}\n\n'
-            f'{emoji_tag("4958534696645428119", "⚠️")} MINIMUM WITHDRAW: ${min_w}\n'
-            f'{emoji_tag("4958926882994127612", "💰")} YOUR CURRENT BALANCE: ${balance:.3f}\n'
-            f'{emoji_tag("4958642964181025908", "🧾")} NEED: ${need:.3f}\n\n'
-            f'{emoji_tag("4958503072801228000", "📢")} KINDLY GRAB SOME OTP TO WITHDRAW YOU BALANCE {emoji_tag("4956721670690702265", "✅")}'
-        )
-        await edit_or_send(query, text, reply_markup=None, parse_mode='HTML', context=context, auto_delete=False)
+        first_name = query.from_user.first_name or "User"
+        alert_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need ${min_w} - ${balance:.2f} 💸 To Withdraw 👍🏻"
+        await query.answer(alert_text, show_alert=True)
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
     await edit_or_send(query, f"💳 <b>Withdraw via {method}</b>\n\n💵 Your Balance: ${balance:.2f}\n💬 <b>Enter the amount you want to withdraw:</b>",
@@ -1971,7 +1971,7 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     data = query.data
     if not is_super_admin(user_id):
-        await query.answer("⚠️ Access Denied! You cannot perform this action.", show_alert=True)
+        await query.answer("🫵 YOU ARE NOT A ADMIN 🫅 \n ACCESS DENIED ❌", show_alert=True)
         return
     parts = data.split('|')
     if len(parts) != 2:
@@ -1995,11 +1995,6 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if action == "approve":
-        # Deduct balance and update user
-        user_balance = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (req_user_id,))
-        if not user_balance or user_balance[0] < amount:
-            await query.answer("User balance insufficient.", show_alert=True)
-            return
         # Update status atomically
         db_exec("UPDATE withdraw_requests SET status = 'approved', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
@@ -2007,8 +2002,9 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         if affected == 0:
             await query.answer("Already processed.", show_alert=True)
             return
-        await context.bot.send_message(req_user_id, f"<tg-emoji emoji-id=\"5420396762189831222\">🎉</tg-emoji> <b>Withdrawal Approved!</b>\nYour request of ${amount:.2f} has been sent to <code>{account_number}</code>.", parse_mode='HTML')
-        btn_text = "✅ APPROVED"
+        # Balance already deducted, just notify user
+        await context.bot.send_message(req_user_id, f"{emoji_tag(WALLET_EMOJI, '💰')} YOUR BALANCE IS SENDED SUCCESSFULLY TO YOUR WALLET  {emoji_tag(SUCCESS_EMOJI, '✅')}", parse_mode='HTML')
+        btn_text = "APPROVED BY ADMIN"
         btn_style = KBS.SUCCESS
         btn_icon = SUCCESS_EMOJI
     else:  # reject / cancle
@@ -2020,8 +2016,8 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
             return
         # Refund the deducted amount
         db_exec("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, req_user_id))
-        await context.bot.send_message(req_user_id, f"<tg-emoji emoji-id=\"5336944168944047463\">⚠️</tg-emoji> <b>Withdrawal Cancelled!</b>\nYour request of ${amount:.2f} to <code>{account_number}</code> was cancelled and refunded.", parse_mode='HTML')
-        btn_text = "❌ CANCLED"
+        await context.bot.send_message(req_user_id, f"{emoji_tag(WALLET_EMOJI, '💰')} YOUR WITHDRAWAL REQUEST IS CANCELLED BY ADMIN {emoji_tag(DANGER_EMOJI, '❌')}", parse_mode='HTML')
+        btn_text = "CANCLED BY ADMIN"
         btn_style = KBS.DANGER
         btn_icon = DANGER_EMOJI
 
@@ -2996,7 +2992,7 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
             elapsed = (datetime.now() - last_time).total_seconds()
             remaining = cooldown - elapsed
             if remaining > 0:
-                await query.answer(f"⌚Wait {int(math.ceil(remaining))}s To Get Another Numbers ✅", show_alert=True)
+                await query.answer(f"⌚ Wait {int(math.ceil(remaining))}s To Get New Number ✅", show_alert=True)
                 return
         except:
             pass
@@ -3141,6 +3137,7 @@ async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.delete()
     except:
         pass
+    # Send main menu with keyboard
     await send_main_menu(query, context, user_id)
 
 async def toggle_cc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3234,6 +3231,20 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
+    # Cooldown check
+    cooldown = int(get_setting('cooldown', 5))
+    row = db_fetch_one("SELECT last_number_time FROM users WHERE user_id=?", (user_id,))
+    last_time_str = row[0] if row else None
+    if last_time_str:
+        try:
+            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+            elapsed = (datetime.now() - last_time).total_seconds()
+            remaining = cooldown - elapsed
+            if remaining > 0:
+                await query.answer(f"⌚ Wait {int(math.ceil(remaining))}s To Get New Number ✅", show_alert=True)
+                return
+        except:
+            pass
     await query.answer("Getting next numbers...")
     await edit_or_send(query, f'{emoji_tag("5976826804931928647", "⏳")}', parse_mode='HTML', context=context, auto_delete=False)
     await asyncio.sleep(1)
@@ -3270,6 +3281,8 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 (user_id, number, country, service, now_str, expiry))
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
+    # Update cooldown in DB
+    db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
@@ -3326,6 +3339,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "exit":
         await exit_admin_callback_query(query, user_id, context.bot)
     elif action == "back":
+        # Return to admin panel
         admin_panel_state[user_id] = "main"
         await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     elif action == "stock_management":
@@ -3758,7 +3772,7 @@ async def country_manager_menu(update: Update, user_id, context: ContextTypes.DE
     admin_panel_state[user_id] = "country_manager"
     rows = [
         [InlineKeyboardButton("Add New Country", callback_data="country_add", style=KBS.SUCCESS,
-                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("ADD", "")))],
+                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("COUNTRY_MANAGER", "")))],
         [InlineKeyboardButton("List All Countries", callback_data="country_list", style=KBS.PRIMARY,
                               icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("LIST_API_KEY", "")))],
         [InlineKeyboardButton("Edit Country", callback_data="country_edit_select", style=KBS.PRIMARY,
@@ -3889,7 +3903,7 @@ async def service_manager_menu(update: Update, user_id, context: ContextTypes.DE
     admin_panel_state[user_id] = "service_manager"
     rows = [
         [InlineKeyboardButton("Add New Service", callback_data="service_add", style=KBS.SUCCESS,
-                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("ADD", "")))],
+                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("SERVICE_MANAGER", "")))],
         [InlineKeyboardButton("Remove Service", callback_data="service_remove", style=KBS.DANGER,
                               icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("DELETE", "")))],
         [InlineKeyboardButton("Toggle Service Active", callback_data="service_toggle", style=KBS.PRIMARY,
@@ -4105,11 +4119,15 @@ async def send_balance_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f'{emoji_tag(CUSTOM_EMOJIS["PROFILE_ICON"], "👤")} '
         f'<a href="tg://user?id={user_id}">{html.escape(first_name)}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
         f'------------------------------------------------\n'
-        f'{emoji_tag(emoji_id, "🆔")} USER ID: <code>{user_id}</code>\n'
-        f'{emoji_tag(emoji_money, "💰")} BALANCE: <code>${balance:.3f}</code>\n'
-        f'{emoji_tag(emoji_withdraw, "💸")} WITHDRAWED: <code>${withdrawn:.3f}</code>\n'
-        f'{emoji_tag(emoji_warning, "⚠️")} MINIMUM WITHDRAW: <code>${get_setting("min_withdraw", "10.0")}</code>\n'
-        f'{emoji_tag(emoji_inbox, "📨")} TOTAL OTP: <code>{total_otp}</code>'
+        f'{emoji_tag(emoji_id, "🆔")} <b>USER ID:</b>  <code>{user_id}</code>\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_money, "💰")} <b>BALANCE:</b> ${balance:.2f}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_withdraw, "💸")} <b>WITHDRAWED:</b>  ${withdrawn:.3f}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_warning, "⚠️")} <b>MINIMUM WITHDRAW:</b>  ${get_setting("min_withdraw", "10.0")}\n'
+        f'------------------------------------------------\n'
+        f'{emoji_tag(emoji_inbox, "📨")} <b>TOTAL OTP:</b>  {total_otp}'
     )
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("WITHDRAW", callback_data="withdraw", style=KBS.SUCCESS,
@@ -4131,6 +4149,28 @@ async def send_admin_panel_msg(update: Update, context: ContextTypes.DEFAULT_TYP
     admin_mode[user_id] = True
     admin_panel_state[user_id] = "main"
     await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓", reply_markup=admin_panel_keyboard(), auto_delete=False)
+
+# ================= MISSING FUNCTIONS =================
+def get_numbers_from_stock(country, service, count):
+    """Retrieve available numbers from stock for given country and service."""
+    rows = db_fetch_all(
+        "SELECT number FROM available_numbers WHERE country = ? AND service = ? AND used = 0 LIMIT ?",
+        (country, service, count)
+    )
+    if not rows:
+        return []
+    numbers = [row[0] for row in rows]
+    # Mark as used
+    for num in numbers:
+        db_exec("UPDATE available_numbers SET used = 1 WHERE number = ? AND country = ? AND service = ?",
+                (num, country, service))
+    return numbers
+
+def delete_country_stock(country, service):
+    """Delete all stock for a given country and service."""
+    db_exec("DELETE FROM available_numbers WHERE country = ? AND service = ?", (country, service))
+    db_exec("UPDATE countries SET stock = 0 WHERE name = ? AND service = ?", (country, service))
+    return True
 
 # ================= CURL PARSER (unchanged) =================
 import re
