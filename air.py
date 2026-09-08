@@ -51,7 +51,7 @@ cdr_polling_tasks = {}
 polling_cycle_counts = {}
 application = None
 user_states = {}
-user_cooldowns = {}  # fallback in-memory; main cooldown is in DB
+user_cooldowns = {}  # fallback; main cooldown is in DB
 
 # ================= EXTERNAL FILE LOADERS =================
 def load_country_code_map():
@@ -71,7 +71,6 @@ def load_country_code_map():
                     if code.isdigit():
                         mapping[code] = {"code": code, "iso": iso.upper(), "flag": flag, "name": name}
     except FileNotFoundError:
-        # Create default file
         with open(path, 'w', encoding='utf-8') as f:
             f.write("# COUNTRY_CODE_MAP.txt\n# Format: calling_code|ISO2|flag|country_name\n")
             f.write("880|BD|🇧🇩|Bangladesh\n")
@@ -172,7 +171,6 @@ def resolve_country(country=None, code=None, number=None):
         clean = number.replace('+', '').replace(' ', '').strip()
         for c_code, info in COUNTRY_CODE_MAP.items():
             if clean.startswith(c_code):
-                # Found
                 flag = info['flag']
                 emoji_id = GLOBAL_BODY_EMOJIS.get(flag, '')
                 return {
@@ -229,33 +227,24 @@ def get_premium_app(service_name):
     if not service_name:
         return {"name": "Other", "emoji": "📱", "id": ""}
     key = service_name.strip()
-    # Exact match
     if key in PREMIUM_APPS:
         return PREMIUM_APPS[key]
-    # Case-insensitive
     for name, info in PREMIUM_APPS.items():
         if name.lower() == key.lower():
             return info
-    # Fallback
     return {"name": key, "emoji": "📱", "id": ""}
 
 def service_premium_tag(service_name):
-    """Return <tg-emoji> tag for service."""
-    app = get_premium_app(service_name)
-    return emoji_tag(app.get("id", ""), app.get("emoji", "📱"))
+    return emoji_tag(get_premium_app(service_name).get("id", ""), get_premium_app(service_name).get("emoji", "📱"))
 
 def country_flag_emoji_tag(country=None, code=None, number=None):
-    """Return <tg-emoji> tag for country flag."""
     info = resolve_country(country, code, number)
     return emoji_tag(info.get("emoji_id", ""), info.get("flag", "🏳️"))
 
 def get_country_flag_html(country_name):
-    """Legacy: return <tg-emoji> tag for country name."""
-    info = resolve_country(country=country_name)
-    return emoji_tag(info.get("emoji_id", ""), info.get("flag", "🏳️"))
+    return country_flag_emoji_tag(country=country_name)
 
 def get_country_info_from_code(calling_code):
-    """Return (iso, flag, name) from calling code."""
     info = resolve_country(code=calling_code)
     return info.get("iso"), info.get("flag"), info.get("name")
 
@@ -292,16 +281,13 @@ def apply_emojis(text):
     """
     if not text:
         return text
-    # Protect existing tg-emoji tags
     protected_text, protected_tags = _protect_tg_emoji_tags(text)
-    # Replace flag characters
     for flag, eid in GLOBAL_BODY_EMOJIS.items():
         if flag in protected_text:
             protected_text = protected_text.replace(
                 flag,
                 f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
             )
-    # Restore protected tags
     return _restore_tg_emoji_tags(protected_text, protected_tags)
 
 def emoji_tag(emoji_id, fallback=""):
@@ -572,6 +558,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS withdraw_requests (
     status TEXT DEFAULT 'pending',
     created_at TEXT,
     updated_at TEXT,
+    processed_by INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 )''')
 c.execute("CREATE INDEX IF NOT EXISTS idx_withdraw_user_status ON withdraw_requests(user_id, status)")
@@ -1186,7 +1173,6 @@ def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
         flag_html = country_flag_emoji_tag(country=name)
         payout = get_country_info(name).get("payout", "0.001$")
         label = f"{name} — {payout} — ({stock})"
-        # Extract emoji_id from flag_html
         match = re.search(r'emoji-id="(\d+)"', flag_html)
         icon_id = match.group(1) if match else None
         rows.append([InlineKeyboardButton(
@@ -1843,7 +1829,7 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     balance = user_data[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        await query.answer(f"❌ Minimum withdraw is ${min_w}. You have ${balance:.2f}.", show_alert=True)
+        await query.answer("Your balance is too low.", show_alert=True)
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
     await edit_or_send(query, f"💳 <b>Withdraw via {method}</b>\n\n💵 Your Balance: ${balance:.2f}\n💬 <b>Enter the amount you want to withdraw:</b>",
@@ -1907,6 +1893,12 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
     account_number = update.message.text.strip()
     # Update request with account number
     db_exec("UPDATE withdraw_requests SET account_number = ? WHERE id = ?", (account_number, request_id))
+    # Deduct balance atomically when request is created
+    user = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (user_id,))
+    if not user or user[0] < amount:
+        await update.message.reply_text("❌ Insufficient balance.", reply_markup=get_back_only_keyboard())
+        return True
+    db_exec("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
     w_group = get_setting("w_group", "")
     if w_group:
         first_name = update.effective_user.first_name or "User"
@@ -1997,15 +1989,29 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         if not user_balance or user_balance[0] < amount:
             await query.answer("User balance insufficient.", show_alert=True)
             return
-        db_exec("UPDATE users SET balance = balance - ?, withdrawn = withdrawn + ? WHERE user_id = ?", (amount, amount, req_user_id))
-        db_exec("UPDATE withdraw_requests SET status = 'approved', updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), request_id))
+        # Update status atomically
+        db_exec("UPDATE withdraw_requests SET status = 'approved', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
+        # Check if update actually happened (rowcount)
+        affected = c.rowcount
+        if affected == 0:
+            await query.answer("Already processed.", show_alert=True)
+            return
         await context.bot.send_message(req_user_id, f"<tg-emoji emoji-id=\"5420396762189831222\">🎉</tg-emoji> <b>Withdrawal Approved!</b>\nYour request of ${amount:.2f} has been sent to <code>{account_number}</code>.", parse_mode='HTML')
         btn_text = "✅ APPROVED"
         btn_style = KBS.SUCCESS
         btn_icon = SUCCESS_EMOJI
     else:  # reject / cancle
-        db_exec("UPDATE withdraw_requests SET status = 'rejected', updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), request_id))
-        await context.bot.send_message(req_user_id, f"<tg-emoji emoji-id=\"5336944168944047463\">⚠️</tg-emoji> <b>Withdrawal Cancelled!</b>\nYour request of ${amount:.2f} to <code>{account_number}</code> was cancelled.", parse_mode='HTML')
+        # Update status atomically and refund balance
+        db_exec("UPDATE withdraw_requests SET status = 'rejected', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
+        affected = c.rowcount
+        if affected == 0:
+            await query.answer("Already processed.", show_alert=True)
+            return
+        # Refund the deducted amount
+        db_exec("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, req_user_id))
+        await context.bot.send_message(req_user_id, f"<tg-emoji emoji-id=\"5336944168944047463\">⚠️</tg-emoji> <b>Withdrawal Cancelled!</b>\nYour request of ${amount:.2f} to <code>{account_number}</code> was cancelled and refunded.", parse_mode='HTML')
         btn_text = "❌ CANCLED"
         btn_style = KBS.DANGER
         btn_icon = DANGER_EMOJI
@@ -6729,12 +6735,10 @@ def main():
         BOT_USERNAME = "SRNumberHubBot"
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Custom filter for chat_shared messages – only process messages that have chat_shared
     class ChatSharedFilter(filters.MessageFilter):
         def filter(self, message):
             return message.chat_shared is not None
 
-    # Use the custom filter so this handler does not block normal text messages
     application.add_handler(MessageHandler(ChatSharedFilter() & filters.ChatType.PRIVATE, handle_chat_shared))
 
     application.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_all_documents), group=0)
@@ -6853,6 +6857,7 @@ def main():
     application.add_handler(CallbackQueryHandler(edit_main_channel_callback, pattern="^edit_main_channel$"))
 
     application.add_handler(CallbackQueryHandler(user_withdraw_method, pattern=r"^user_withdraw_.+$"))
+    # Admin withdraw callback (approve/reject)
     application.add_handler(CallbackQueryHandler(admin_withdraw_callback, pattern=r"^admin_w_(approve|reject)\|"))
 
     # This handler now receives all non‑command text messages
