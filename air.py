@@ -707,6 +707,10 @@ def extract_otp_from_message(message: str) -> str | None:
                     continue
                 all_matches.append(cleaned)
     if not all_matches:
+        # Try to find any sequence of digits of length 4-8 as a last resort
+        fallback = re.search(r'\b(\d{4,8})\b', message)
+        if fallback:
+            return fallback.group(1)
         return None
     keywords = ['otp', 'code', 'pin', 'verification', 'instagram', 'whatsapp', 'telegram', 'facebook']
     scored = []
@@ -734,7 +738,7 @@ def extract_otp_from_message(message: str) -> str | None:
     if best[1] > 0:
         return best[0]
     else:
-        return all_matches[0]
+        return all_matches[0] if all_matches else None
 
 def extract_all_otps_from_message(message: str) -> list[str]:
     if not message:
@@ -766,9 +770,8 @@ def get_service_info_html(service_name):
     return f'<tg-emoji emoji-id="{emoji_id}">{normal_emoji}</tg-emoji> <b>{html.escape(short_name)}</b>', emoji_id
 
 def extract_otp_code(message_text):
-    match = re.search(r'\b(\d{3}[\s-]?\d{3,4}|\d{4,8})\b', str(message_text))
-    if match: return match.group(1)
-    return "N/A"
+    otp = extract_otp_from_message(message_text)
+    return otp if otp else "N/A"
 
 def generate_otp_display(service_name, raw_number, message_text, lang):
     clean_number = str(raw_number).lstrip('+')
@@ -1177,9 +1180,7 @@ def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
     for name, stock in countries:
         flag_html = country_flag_emoji_tag(country=name)
         payout = get_country_info(name).get("payout", "0.001$")
-        # Format: {flag_emoji} {country_name}–{payout}–{stock}
-        label = f"{flag_html} {name}–{payout}–{stock}"
-        # Extract emoji_id from flag_html for icon (if premium)
+        label = f"{name}–{payout}–{stock}"
         match = re.search(r'emoji-id="(\d+)"', flag_html)
         icon_id = match.group(1) if match else None
         rows.append([InlineKeyboardButton(
@@ -1547,7 +1548,7 @@ def start_welcome_html():
     think = emoji_tag(WELCOME_THINK, "🤔")
     inbox = emoji_tag(INBOX_EMOJI, "📩")
     money = emoji_tag(MONEY_EMOJI, "🤑")
-    block = blockquote(f"{wave} <b>WELCOME TO OUR 𝐀𝐈𝐑 𝐍𝐔𝐌𝐁𝐄𝐑 𝐁𝐎𝐓</b> {think}")
+    block = blockquote(f"{wave} <b>WELCOME TO OUR 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓</b> {think}")
     sub = f'<b>{inbox} RECEIVE OTP\'S AND START EARNING MONEY {money}</b>'
     return f'{block}\n{sub}'
 
@@ -1570,8 +1571,7 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return sent
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    # Changed to plain text: 🏠<b>Main Menu</b>
-    main_text = '🏠<b>Main Menu</b>'
+    main_text = '🏠 Main Menu'
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1769,7 +1769,7 @@ async def show_get_number(update: Update, context, user_id, first_name):
     else:
         await send_clean_message(update, context, text, reply_markup=services_keyboard(), parse_mode='HTML', auto_delete=False)
 
-# ================= BALANCE & WITHDRAW (fixed) =================
+# ================= BALANCE & WITHDRAW (FIXED) =================
 async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE = None):
     ensure_user(user_id, update.effective_user.username, update.effective_user.first_name)
     user = db_fetch_one("SELECT first_name, balance, withdrawn, total_otp FROM users WHERE user_id = ?", (user_id,))
@@ -1809,6 +1809,7 @@ async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TY
         if context:
             await send_clean_message(update, context, text, reply_markup=kb, parse_mode='HTML', auto_delete=False)
 
+# LOW BALANCE POPUP FIX: show_alert=True
 async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE = None):
     ensure_user(user_id, update.effective_user.username, update.effective_user.first_name)
     balance = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (user_id,))
@@ -1817,7 +1818,6 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
     balance = balance[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        # Low balance – show popup if it's a callback
         first_name = update.effective_user.first_name or "User"
         need = min_w - balance
         popup_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
@@ -1825,7 +1825,6 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
             await update.answer(popup_text, show_alert=True)
             return
         else:
-            # Fallback to message if not callback (should not happen)
             await reply_or_edit(update, popup_text, context=context, auto_delete=False)
             return
     methods = get_setting('w_methods', [])
@@ -1969,7 +1968,7 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=admin_id, text=apply_emojis(w_msg), reply_markup=w_markup, parse_mode='HTML')
             except Exception as e:
                 print(f"Failed to send to admin {admin_id}: {e}")
-    # User confirmation message with heading
+    # FIX: User confirmation message with success emoji and bold heading
     success_msg = (
         f"<tg-emoji emoji-id=\"5420396762189831222\">🆕</tg-emoji> <b>WITHDRAW REQUEST SUBMITTED</b>\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -1996,7 +1995,7 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     user_id = query.from_user.id
     data = query.data
-    # Permission: now any admin (not just super admin) can approve/cancel
+    # Permission: any admin can approve/cancel
     if not is_admin(user_id):
         await query.answer("🫵 YOU ARE NOT A ADMIN 🫅 \n ACCESS DENIED ❌", show_alert=True)
         return
@@ -2059,7 +2058,7 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ================= SHOW SUPPORT/INVITE =================
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: ＲＡＫＥＳＨ"
+    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
     if isinstance(update, CallbackQuery):
         user_id = update.effective_user.id
         await edit_or_send(update, text, reply_markup=support_keyboard(), context=context, auto_delete=False)
@@ -2099,7 +2098,7 @@ async def enter_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_admin(user_id):
         admin_mode[user_id] = True
         admin_panel_state[user_id] = "main"
-        await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), auto_delete=False)
+        await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), auto_delete=False)
     else:
         await update.message.reply_text("Unauthorized access!")
 
@@ -2178,7 +2177,7 @@ async def admin_panel_menu(update: Update, user_id, context: ContextTypes.DEFAUL
         return
     admin_mode[user_id] = True
     admin_panel_state[user_id] = "main"
-    text = "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:"
+    text = "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:"
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, text, reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     else:
@@ -3356,7 +3355,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "back":
         # Return to admin panel
         admin_panel_state[user_id] = "main"
-        await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
+        await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     elif action == "stock_management":
         await stock_management_menu(query, context, user_id)
 
@@ -4152,7 +4151,7 @@ async def send_balance_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def send_support_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: ＲＡＫＥＳＨ"
+    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
     sent_inline = await context.bot.send_message(chat_id=user_id, text=apply_emojis(text), reply_markup=support_keyboard())
     db_exec("UPDATE users SET last_bot_message_id=? WHERE user_id=?", (sent_inline.message_id, user_id))
 
@@ -4163,7 +4162,7 @@ async def send_admin_panel_msg(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     admin_mode[user_id] = True
     admin_panel_state[user_id] = "main"
-    await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ", reply_markup=admin_panel_keyboard(), auto_delete=False)
+    await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓", reply_markup=admin_panel_keyboard(), auto_delete=False)
 
 # ================= MISSING FUNCTIONS =================
 def get_numbers_from_stock(country, service, count):
@@ -6546,7 +6545,7 @@ def get_api_config(api_id: int) -> dict | None:
             'total_otps','last_otp_time','placeholder_config','curl_command']
     return dict(zip(cols, row))
 
-# ================= OTP PROCESSING =================
+# ================= OTP PROCESSING (FIXED) =================
 async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot=None):
     if context:
         bot = context.bot
@@ -6565,7 +6564,11 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
     for num, uid, country, assigned in active_rows:
         clean = num.replace('+', '')
         num_map.setdefault(clean, []).append((uid, country, assigned))
-    group_ids = GROUP_IDS
+    
+    # FIX: Always fetch fresh group IDs from DB
+    group_ids = get_otp_group_ids()
+    print(f"📤 OTP processing: group_ids = {group_ids}")
+    
     semaphore = asyncio.Semaphore(50)
     new_otp_count = 0
 
@@ -6575,7 +6578,7 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
                 text = apply_emojis(text)
                 await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
             except Exception as e:
-                print(f"Failed to send to {chat_id}: {e}")
+                print(f"❌ Failed to send to {chat_id}: {e}")
 
     async def process_single_otp(otp_entry):
         nonlocal new_otp_count
@@ -6607,19 +6610,26 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
             except:
                 pass
 
+        # Send to OTP groups (always, even if no active user)
+        if not existing and group_ids:
+            try:
+                lang = detect_language(message)
+                grp_text, grp_kb = generate_otp_display(service_name, number, message, lang)
+                for gid in group_ids:
+                    try:
+                        await bot.send_message(chat_id=gid, text=apply_emojis(grp_text), reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
+                        print(f"📤 OTP sent to group {gid}: {number} -> {otp_code}")
+                    except Exception as e:
+                        print(f"❌ Group {gid} send failed: {e}")
+            except Exception as e:
+                print(f"❌ Group send preparation failed: {e}")
+
+        # Insert into DB after sending to groups (to avoid duplicate group sends)
         if not existing:
             db_exec("INSERT INTO otps (number, otp, message, timestamp, forwarded, user_id) VALUES (?,?,?,?,1,0)",
                     (number, otp_code, message, otp_timestamp_str))
-            
-            if group_ids:
-                try:
-                    lang = detect_language(message)
-                    grp_text, grp_kb = generate_otp_display(service_name, number, message, lang)
-                    for gid in group_ids:
-                        await bot.send_message(chat_id=gid, text=apply_emojis(grp_text), reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
-                except Exception as e:
-                    print(f"Group send failed: {e}")
 
+        # Now handle user DM if there is an active user for this number
         clean_number = number.replace('+', '')
         local_tasks = []
         if clean_number in num_map:
