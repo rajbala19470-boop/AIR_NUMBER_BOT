@@ -1829,7 +1829,12 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     balance = user_data[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        await query.answer("Your balance is too low.", show_alert=True)
+        first_name = query.from_user.first_name or "User"
+        remaining = min_w - balance
+        await query.answer(
+            f"⚠️ {first_name} YOUR BALANCE IS LOW 😅\nYou Need ${remaining:.2f}",
+            show_alert=True
+        )
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
     await edit_or_send(query, f"💳 <b>Withdraw via {method}</b>\n\n💵 Your Balance: ${balance:.2f}\n💬 <b>Enter the amount you want to withdraw:</b>",
@@ -1957,6 +1962,8 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
 # ================= ADMIN WITHDRAW HANDLERS (FIXED) =================
 async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query is None:
+        return
     user_id = query.from_user.id
     data = query.data
     if not is_super_admin(user_id):
@@ -1992,7 +1999,6 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         # Update status atomically
         db_exec("UPDATE withdraw_requests SET status = 'approved', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
-        # Check if update actually happened (rowcount)
         affected = c.rowcount
         if affected == 0:
             await query.answer("Already processed.", show_alert=True)
@@ -2002,7 +2008,6 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         btn_style = KBS.SUCCESS
         btn_icon = SUCCESS_EMOJI
     else:  # reject / cancle
-        # Update status atomically and refund balance
         db_exec("UPDATE withdraw_requests SET status = 'rejected', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
         affected = c.rowcount
@@ -3749,11 +3754,11 @@ async def country_manager_menu(update: Update, user_id, context: ContextTypes.DE
     admin_panel_state[user_id] = "country_manager"
     rows = [
         [InlineKeyboardButton("Add New Country", callback_data="country_add", style=KBS.SUCCESS,
-                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("COUNTRY_MANAGER", "")))],
+                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("ADD", "")))],
         [InlineKeyboardButton("List All Countries", callback_data="country_list", style=KBS.PRIMARY,
-                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("COUNTRY_MANAGER", "")))],
+                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("LIST_API_KEY", "")))],
         [InlineKeyboardButton("Edit Country", callback_data="country_edit_select", style=KBS.PRIMARY,
-                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("COUNTRY_MANAGER", "")))],
+                              icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("EDIT_BALANCE", "")))],
         [InlineKeyboardButton("Delete Country", callback_data="country_delete_select", style=KBS.DANGER,
                               icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("DELETE", "")))],
         [InlineKeyboardButton("Back to Admin Panel", callback_data="admin_back", style=KBS.PRIMARY,
@@ -6719,6 +6724,100 @@ async def handle_edit_value_text(update: Update, context: ContextTypes.DEFAULT_T
     await api_detail_page(update, context, api_id, user_id)
     return True
 
+# ================= MISSING FUNCTION: load_numbers_from_file =================
+def load_numbers_from_file(file_path, filename, force_country=None, force_service=None):
+    """
+    Load phone numbers from a text file.
+    Detects country and service from filename if not forced.
+    Returns (count, country, service).
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return 0, "", ""
+
+    numbers = []
+    for line in lines:
+        # Remove any non-digit except '+'
+        num = re.sub(r'[^0-9+]', '', line)
+        if num:
+            numbers.append(num)
+
+    if not numbers:
+        return 0, "", ""
+
+    # Determine country and service from filename
+    base = os.path.basename(filename)
+    base = os.path.splitext(base)[0]  # remove extension
+    # Try to split by '_' or '-'
+    parts = re.split(r'[_-]', base)
+    if len(parts) >= 2:
+        country_candidate = parts[0].strip()
+        service_candidate = parts[1].strip()
+    else:
+        country_candidate = base
+        service_candidate = ""
+
+    # Use forced values if provided
+    if force_country:
+        country = force_country
+    else:
+        # Try to match country_candidate with COUNTRY_CODE_MAP (by name or iso)
+        found = None
+        for code, info in COUNTRY_CODE_MAP.items():
+            if info['name'].lower() == country_candidate.lower() or info['iso'].lower() == country_candidate.lower():
+                found = info['name']
+                break
+        if found:
+            country = found
+        else:
+            # fallback: try to detect from first number's prefix
+            first_num = numbers[0].replace('+', '')
+            for code, info in COUNTRY_CODE_MAP.items():
+                if first_num.startswith(code):
+                    country = info['name']
+                    break
+            else:
+                country = country_candidate  # use as-is
+
+    if force_service:
+        service = force_service
+    else:
+        # Try to match service_candidate with PREMIUM_APPS keys
+        found = None
+        for app_name in PREMIUM_APPS.keys():
+            if app_name.lower() == service_candidate.lower():
+                found = app_name
+                break
+        if found:
+            service = found
+        else:
+            service = service_candidate if service_candidate else "Other"
+
+    # Insert into available_numbers and update countries stock
+    country = country.strip()
+    service = service.strip()
+    added = 0
+    for num in numbers:
+        # Check if already exists
+        existing = db_fetch_one("SELECT id FROM available_numbers WHERE number = ? AND country = ? AND service = ? AND used = 0",
+                                (num, country, service))
+        if existing:
+            continue
+        db_exec("INSERT INTO available_numbers (country, service, number, used) VALUES (?, ?, ?, 0)",
+                (country, service, num))
+        added += 1
+
+    # Update countries table: insert or update stock
+    db_exec("INSERT OR IGNORE INTO countries (name, service, flag, stock) VALUES (?, ?, ?, 0)",
+            (country, service, country))
+    db_exec("UPDATE countries SET stock = stock + ? WHERE name = ? AND service = ?",
+            (added, country, service))
+
+    return added, country, service
+
 # ================= ERROR HANDLER =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print(f"Error: {context.error}")
@@ -6857,10 +6956,8 @@ def main():
     application.add_handler(CallbackQueryHandler(edit_main_channel_callback, pattern="^edit_main_channel$"))
 
     application.add_handler(CallbackQueryHandler(user_withdraw_method, pattern=r"^user_withdraw_.+$"))
-    # Admin withdraw callback (approve/reject)
     application.add_handler(CallbackQueryHandler(admin_withdraw_callback, pattern=r"^admin_w_(approve|reject)\|"))
 
-    # This handler now receives all non‑command text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_error_handler(error_handler)
 
