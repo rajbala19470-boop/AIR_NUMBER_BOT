@@ -53,6 +53,9 @@ application = None
 user_states = {}
 user_cooldowns = {}  # fallback; main cooldown is in DB
 
+# In-memory cache to prevent duplicate OTP forwards to groups (within 5 seconds)
+recent_forwarded_otps = {}
+
 # ================= EXTERNAL FILE LOADERS =================
 def load_country_code_map():
     """Load country code mapping from COUNTRY_CODE_MAP.txt."""
@@ -1825,6 +1828,7 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
             await update.answer(popup_text, show_alert=True)
             return
         else:
+            # Fallback: send as message (should not happen for callback)
             await reply_or_edit(update, popup_text, context=context, auto_delete=False)
             return
     methods = get_setting('w_methods', [])
@@ -6598,33 +6602,42 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
         if not number:
             return 0
 
-        existing = db_fetch_one(
-            "SELECT id, timestamp FROM otps WHERE number=? AND otp=? AND (user_id=0 OR user_id>0) ORDER BY timestamp DESC LIMIT 1",
-            (number, otp_code)
-        )
-        if existing:
-            try:
-                last_ts = datetime.strptime(existing[1], "%Y-%m-%d %H:%M:%S")
-                if (now - last_ts).total_seconds() < 1:
-                    return 0
-            except:
-                pass
+        # Generate a unique ID for this OTP to avoid duplicate group sends within a short time
+        otp_id = f"{number}_{otp_code}"
+        now_ts = time.time()
+        # Check in-memory cache
+        if otp_id in recent_forwarded_otps:
+            last_sent = recent_forwarded_otps[otp_id]
+            if now_ts - last_sent < 5:  # 5 seconds dedup window
+                print(f"⏩ Skipping duplicate OTP (within 5s): {otp_id}")
+                return 0
+        # Update cache
+        recent_forwarded_otps[otp_id] = now_ts
+        # Clean old entries (older than 60s)
+        for key in list(recent_forwarded_otps.keys()):
+            if now_ts - recent_forwarded_otps[key] > 60:
+                del recent_forwarded_otps[key]
 
         # Send to OTP groups (always, even if no active user)
-        if not existing and group_ids:
+        if group_ids:
             try:
                 lang = detect_language(message)
                 grp_text, grp_kb = generate_otp_display(service_name, number, message, lang)
+                print(f"📤 Sending to groups: {group_ids}")
                 for gid in group_ids:
                     try:
                         await bot.send_message(chat_id=gid, text=apply_emojis(grp_text), reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
-                        print(f"📤 OTP sent to group {gid}: {number} -> {otp_code}")
+                        print(f"✅ OTP sent to group {gid}: {number} -> {otp_code}")
                     except Exception as e:
                         print(f"❌ Group {gid} send failed: {e}")
             except Exception as e:
                 print(f"❌ Group send preparation failed: {e}")
 
-        # Insert into DB after sending to groups (to avoid duplicate group sends)
+        # Insert into DB (if not already exists)
+        existing = db_fetch_one(
+            "SELECT id FROM otps WHERE number=? AND otp=? AND (user_id=0 OR user_id>0) ORDER BY timestamp DESC LIMIT 1",
+            (number, otp_code)
+        )
         if not existing:
             db_exec("INSERT INTO otps (number, otp, message, timestamp, forwarded, user_id) VALUES (?,?,?,?,1,0)",
                     (number, otp_code, message, otp_timestamp_str))
@@ -6677,12 +6690,13 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
 
         if local_tasks:
             await asyncio.gather(*local_tasks)
-        return 1 if existing is None else 0
+        return 1  # Count this OTP as processed (new) for stats
 
     tasks = [process_single_otp(otp) for otp in otps_list]
     results = await asyncio.gather(*tasks)
     total_global_new = sum(results)
     save_user_data_json()
+    print(f"📊 OTP processing complete: {total_global_new} new OTPs processed.")
     return total_global_new
 
 # ================= GENERIC TEXT HANDLER =================
