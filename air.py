@@ -308,7 +308,7 @@ WELCOME_WAVE = "5199885118214255386"
 WELCOME_THINK = "5314563983422798645"
 INBOX_EMOJI = "5472239203590888751"
 MONEY_EMOJI = "5805602131176069048"
-MAIN_MENU_EMOJI = "5438499684270238914"
+MAIN_MENU_EMOJI = "6267186570034419608"   # UPDATED
 HEADER_EMOJI_1 = "6282641460093260838"
 HEADER_EMOJI_2 = "6267315814190290529"
 SUPPORT_EMOJI = "6264853036993090338"
@@ -1117,6 +1117,7 @@ BTN_SUPPORT = "SUPPORT"
 BTN_ADMIN = "Admin Panel"
 BTN_INVITE = "INVITE FRIEND"
 
+# Main reply keyboard – NO BACK BUTTON
 def bottom_menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [
@@ -1165,6 +1166,7 @@ def services_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
+    # Get available stock for each country
     countries = db_fetch_all(
         "SELECT name, stock FROM countries WHERE service = ? AND active = 1 AND stock > 0 ORDER BY name",
         (service,)
@@ -1175,7 +1177,9 @@ def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
     for name, stock in countries:
         flag_html = country_flag_emoji_tag(country=name)
         payout = get_country_info(name).get("payout", "0.001$")
-        label = f"{name} — {payout} — ({stock})"
+        # Format: {flag_emoji} {country_name}–{payout}–{stock}
+        label = f"{flag_html} {name}–{payout}–{stock}"
+        # Extract emoji_id from flag_html for icon (if premium)
         match = re.search(r'emoji-id="(\d+)"', flag_html)
         icon_id = match.group(1) if match else None
         rows.append([InlineKeyboardButton(
@@ -1502,11 +1506,12 @@ def get_back_only_keyboard():
                                                        icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))]])
 
 # ================= NATIVE SELECTION REPLY KEYBOARD HELPER =================
+# REMOVED BACK BUTTON from ReplyKeyboardMarkup
 def selection_reply_keyboard(button_text: str, request_id: int, is_channel: bool = False) -> ReplyKeyboardMarkup:
     request_chat = KeyboardButtonRequestChat(request_id=request_id, chat_is_channel=is_channel)
     keyboard = [
         [KeyboardButton(button_text, request_chat=request_chat)],
-        [KeyboardButton("🔙 BACK")]
+        # BACK button removed
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -1565,7 +1570,8 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return sent
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")}<b>Main Menu</b>'
+    # New format: <tg-emoji emoji-id="6267186570034419608">📱</tg-emoji> <b>MAIN MENU</b>
+    main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")} <b>MAIN MENU</b>'
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1621,6 +1627,22 @@ async def reply_or_edit(target, text: str, reply_markup=None, parse_mode=None, c
                 await target.message.reply_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
             elif hasattr(target, 'edit_message_text'):
                 await target.edit_message_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+# ================= COOLDOWN HELPER =================
+def check_cooldown(user_id: int) -> int:
+    """Returns remaining cooldown seconds (0 if none)."""
+    cooldown = int(get_setting('cooldown', 5))
+    row = db_fetch_one("SELECT last_number_time FROM users WHERE user_id=?", (user_id,))
+    if row and row[0]:
+        try:
+            last_time = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            elapsed = (datetime.now() - last_time).total_seconds()
+            remaining = cooldown - elapsed
+            if remaining > 0:
+                return int(math.ceil(remaining))
+        except:
+            pass
+    return 0
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1795,15 +1817,16 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
     balance = balance[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        # Show popup alert instead of message
+        # Low balance – show popup (if callback)
         first_name = update.effective_user.first_name or "User"
-        alert_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need ${min_w} - ${balance:.2f} 💸 To Withdraw 👍🏻"
+        need = min_w - balance
+        popup_text = f"⚠️ {first_name} Your Balance Is Low.\n🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
         if isinstance(update, CallbackQuery):
-            await update.answer(alert_text, show_alert=True)
+            await update.answer(popup_text, show_alert=True)
             return
         else:
-            # Fallback to message if not callback
-            await reply_or_edit(update, alert_text, context=context, auto_delete=False)
+            # Fallback to message if not callback (should not happen)
+            await reply_or_edit(update, popup_text, context=context, auto_delete=False)
             return
     methods = get_setting('w_methods', [])
     if not methods:
@@ -1837,8 +1860,9 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
         first_name = query.from_user.first_name or "User"
-        alert_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need ${min_w} - ${balance:.2f} 💸 To Withdraw 👍🏻"
-        await query.answer(alert_text, show_alert=True)
+        need = min_w - balance
+        popup_text = f"⚠️ {first_name} Your Balance Is Low.\n🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
+        await query.answer(popup_text, show_alert=True)
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
     await edit_or_send(query, f"💳 <b>Withdraw via {method}</b>\n\n💵 Your Balance: ${balance:.2f}\n💬 <b>Enter the amount you want to withdraw:</b>",
@@ -2982,20 +3006,10 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     if await ban_check(update, context):
         return
     # Cooldown check
-    cooldown = int(get_setting('cooldown', 5))
-    # Check DB last_number_time
-    row = db_fetch_one("SELECT last_number_time FROM users WHERE user_id=?", (user_id,))
-    last_time_str = row[0] if row else None
-    if last_time_str:
-        try:
-            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
-            elapsed = (datetime.now() - last_time).total_seconds()
-            remaining = cooldown - elapsed
-            if remaining > 0:
-                await query.answer(f"⌚ Wait {int(math.ceil(remaining))}s To Get New Number ✅", show_alert=True)
-                return
-        except:
-            pass
+    remaining = check_cooldown(user_id)
+    if remaining > 0:
+        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        return
     await query.answer("Getting numbers...")
     parts = query.data.split('|')
     if len(parts) < 3:
@@ -3177,6 +3191,11 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
         return
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
+    # Cooldown check
+    remaining = check_cooldown(user_id)
+    if remaining > 0:
+        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        return
     await query.answer("Allocating numbers...")
     parts = query.data.split('|')
     if len(parts) < 3:
@@ -3207,6 +3226,8 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
                 (user_id, number, country, service, now_str, expiry))
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
+    # Update cooldown in DB
+    db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
@@ -3232,19 +3253,10 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
     # Cooldown check
-    cooldown = int(get_setting('cooldown', 5))
-    row = db_fetch_one("SELECT last_number_time FROM users WHERE user_id=?", (user_id,))
-    last_time_str = row[0] if row else None
-    if last_time_str:
-        try:
-            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
-            elapsed = (datetime.now() - last_time).total_seconds()
-            remaining = cooldown - elapsed
-            if remaining > 0:
-                await query.answer(f"⌚ Wait {int(math.ceil(remaining))}s To Get New Number ✅", show_alert=True)
-                return
-        except:
-            pass
+    remaining = check_cooldown(user_id)
+    if remaining > 0:
+        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        return
     await query.answer("Getting next numbers...")
     await edit_or_send(query, f'{emoji_tag("5976826804931928647", "⏳")}', parse_mode='HTML', context=context, auto_delete=False)
     await asyncio.sleep(1)
@@ -3680,7 +3692,7 @@ async def force_join_add_select(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = [
         [KeyboardButton("📢 SELECT CHANNEL", request_chat=channel_request)],
         [KeyboardButton("👥 SELECT GROUP", request_chat=group_request)],
-        [KeyboardButton("🔙 BACK")]
+        # BACK button removed
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
