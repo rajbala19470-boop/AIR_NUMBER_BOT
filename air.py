@@ -1,7 +1,7 @@
 # THIS PREMIUM BOT IS DEVELOPED BY RAKESH DEV
 # TG: @SR_ADMIN_RAKESH
 
-import asyncio, json, os, re, sqlite3, threading, tempfile, zipfile, shutil, sys, logging
+import asyncio, json, os, re, sqlite3, threading, tempfile, zipfile, shutil, sys, logging, math
 from datetime import datetime, timedelta
 import random
 import html
@@ -51,10 +51,11 @@ cdr_polling_tasks = {}
 polling_cycle_counts = {}
 application = None
 user_states = {}
-user_cooldowns = {}  # user_id -> last_number_time (datetime)
+user_cooldowns = {}  # fallback in-memory; main cooldown is in DB
 
 # ================= EXTERNAL FILE LOADERS =================
 def load_country_code_map():
+    """Load country code mapping from COUNTRY_CODE_MAP.txt."""
     mapping = {}
     path = "COUNTRY_CODE_MAP.txt"
     try:
@@ -66,18 +67,22 @@ def load_country_code_map():
                 parts = line.split('|')
                 if len(parts) >= 4:
                     code, iso, flag, name = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-                    mapping[code] = (iso, flag, name)
+                    code = code.replace('+', '').replace(' ', '')
+                    if code.isdigit():
+                        mapping[code] = {"code": code, "iso": iso.upper(), "flag": flag, "name": name}
     except FileNotFoundError:
+        # Create default file
         with open(path, 'w', encoding='utf-8') as f:
             f.write("# COUNTRY_CODE_MAP.txt\n# Format: calling_code|ISO2|flag|country_name\n")
             f.write("880|BD|🇧🇩|Bangladesh\n")
-        mapping = {"880": ("BD", "🇧🇩", "Bangladesh")}
+        mapping = {"880": {"code": "880", "iso": "BD", "flag": "🇧🇩", "name": "Bangladesh"}}
     except Exception as e:
         print(f"Error loading COUNTRY_CODE_MAP.txt: {e}")
-        mapping = {"880": ("BD", "🇧🇩", "Bangladesh")}
+        mapping = {"880": {"code": "880", "iso": "BD", "flag": "🇧🇩", "name": "Bangladesh"}}
     return mapping
 
 def load_global_emojis():
+    """Load global country premium emojis from GLOBAL_EMOJI.txt."""
     mapping = {}
     path = "GLOBAL_EMOJI.txt"
     try:
@@ -89,7 +94,7 @@ def load_global_emojis():
                 parts = line.split('|')
                 if len(parts) >= 2:
                     flag, eid = parts[0].strip(), parts[1].strip()
-                    if flag and eid:
+                    if flag and eid.isdigit():
                         mapping[flag] = eid
     except FileNotFoundError:
         with open(path, 'w', encoding='utf-8') as f:
@@ -102,6 +107,7 @@ def load_global_emojis():
     return mapping
 
 def load_premium_apps():
+    """Load premium service apps from PREMUAM_APPS.txt."""
     mapping = {}
     path = "PREMUAM_APPS.txt"
     try:
@@ -113,7 +119,8 @@ def load_premium_apps():
                 parts = line.split('|')
                 if len(parts) >= 3:
                     name, fallback, eid = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                    mapping[name] = {"emoji": fallback, "id": eid}
+                    if eid.isdigit():
+                        mapping[name] = {"name": name, "emoji": fallback, "id": eid}
     except FileNotFoundError:
         default = {
             "WhatsApp": {"emoji": "💬", "id": "5429612632430654504"},
@@ -149,10 +156,119 @@ def load_premium_apps():
         mapping = {}
     return mapping
 
-# Load external data
+# ================= GLOBAL LOADED DATA =================
 COUNTRY_CODE_MAP = load_country_code_map()
 GLOBAL_BODY_EMOJIS = load_global_emojis()
 PREMIUM_APPS = load_premium_apps()
+
+# ================= GLOBAL RESOLVERS =================
+def resolve_country(country=None, code=None, number=None):
+    """
+    Resolve country info from country name, calling code, or phone number.
+    Returns dict with keys: code, iso, flag, name, emoji_id.
+    """
+    # Try by number prefix
+    if number:
+        clean = number.replace('+', '').replace(' ', '').strip()
+        for c_code, info in COUNTRY_CODE_MAP.items():
+            if clean.startswith(c_code):
+                # Found
+                flag = info['flag']
+                emoji_id = GLOBAL_BODY_EMOJIS.get(flag, '')
+                return {
+                    "code": c_code,
+                    "iso": info['iso'],
+                    "flag": flag,
+                    "name": info['name'],
+                    "emoji_id": emoji_id
+                }
+    # Try by code
+    if code:
+        code_clean = code.replace('+', '').replace(' ', '').strip()
+        info = COUNTRY_CODE_MAP.get(code_clean)
+        if info:
+            flag = info['flag']
+            emoji_id = GLOBAL_BODY_EMOJIS.get(flag, '')
+            return {
+                "code": code_clean,
+                "iso": info['iso'],
+                "flag": flag,
+                "name": info['name'],
+                "emoji_id": emoji_id
+            }
+    # Try by country name (case-insensitive)
+    if country:
+        for c_code, info in COUNTRY_CODE_MAP.items():
+            if info['name'].lower() == country.lower():
+                flag = info['flag']
+                emoji_id = GLOBAL_BODY_EMOJIS.get(flag, '')
+                return {
+                    "code": c_code,
+                    "iso": info['iso'],
+                    "flag": flag,
+                    "name": info['name'],
+                    "emoji_id": emoji_id
+                }
+        # Try ISO
+        for c_code, info in COUNTRY_CODE_MAP.items():
+            if info['iso'].lower() == country.lower():
+                flag = info['flag']
+                emoji_id = GLOBAL_BODY_EMOJIS.get(flag, '')
+                return {
+                    "code": c_code,
+                    "iso": info['iso'],
+                    "flag": flag,
+                    "name": info['name'],
+                    "emoji_id": emoji_id
+                }
+    # Fallback
+    return {"code": "", "iso": "XX", "flag": "🏳️", "name": "Unknown", "emoji_id": ""}
+
+def get_premium_app(service_name):
+    """Return premium app info for a service name."""
+    if not service_name:
+        return {"name": "Other", "emoji": "📱", "id": ""}
+    key = service_name.strip()
+    # Exact match
+    if key in PREMIUM_APPS:
+        return PREMIUM_APPS[key]
+    # Case-insensitive
+    for name, info in PREMIUM_APPS.items():
+        if name.lower() == key.lower():
+            return info
+    # Fallback
+    return {"name": key, "emoji": "📱", "id": ""}
+
+def service_premium_tag(service_name):
+    """Return <tg-emoji> tag for service."""
+    app = get_premium_app(service_name)
+    return emoji_tag(app.get("id", ""), app.get("emoji", "📱"))
+
+def country_flag_emoji_tag(country=None, code=None, number=None):
+    """Return <tg-emoji> tag for country flag."""
+    info = resolve_country(country, code, number)
+    return emoji_tag(info.get("emoji_id", ""), info.get("flag", "🏳️"))
+
+def get_country_flag_html(country_name):
+    """Legacy: return <tg-emoji> tag for country name."""
+    info = resolve_country(country=country_name)
+    return emoji_tag(info.get("emoji_id", ""), info.get("flag", "🏳️"))
+
+def get_country_info_from_code(calling_code):
+    """Return (iso, flag, name) from calling code."""
+    info = resolve_country(code=calling_code)
+    return info.get("iso"), info.get("flag"), info.get("name")
+
+def get_country_from_number(number: str) -> str | None:
+    info = resolve_country(number=number)
+    return info.get("name")
+
+def get_country_code(country_name):
+    info = resolve_country(country=country_name)
+    return info.get("iso")
+
+def country_flag_emoji(country_name: str) -> str:
+    return get_country_flag_html(country_name)
 
 # ================= SAFE HTML PIPELINE =================
 def _protect_tg_emoji_tags(text):
@@ -187,6 +303,16 @@ def apply_emojis(text):
             )
     # Restore protected tags
     return _restore_tg_emoji_tags(protected_text, protected_tags)
+
+def emoji_tag(emoji_id, fallback=""):
+    if not emoji_id or not str(emoji_id).isdigit() or len(str(emoji_id)) < 10:
+        return fallback
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+def safe_icon(emoji_id):
+    if emoji_id and isinstance(emoji_id, str) and emoji_id.isdigit() and len(emoji_id) > 9:
+        return emoji_id
+    return None
 
 # ================= EMOJIS (PREMIUM – from constants) =================
 WELCOME_WAVE = "5199885118214255386"
@@ -334,7 +460,6 @@ CUSTOM_EMOJIS = {
     "CDR_BACK": "6118297066247558366",
 }
 
-# AIR_CONTROL emoji
 AIR_CONTROL_EMOJI = "6104916469299027589"
 
 # ================= DATABASE SETUP =================
@@ -364,7 +489,11 @@ c.execute('''CREATE TABLE IF NOT EXISTS users
               banned INTEGER DEFAULT 0,
               persistent_message_id INTEGER DEFAULT NULL,
               total_invites INTEGER DEFAULT 0,
-              invited_by INTEGER DEFAULT NULL)''')
+              invited_by INTEGER DEFAULT NULL,
+              balance REAL DEFAULT 0,
+              withdrawn REAL DEFAULT 0,
+              total_otp INTEGER DEFAULT 0,
+              last_number_time TEXT DEFAULT NULL)''')
 
 c.execute('''CREATE TABLE IF NOT EXISTS numbers
              (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, number TEXT,
@@ -434,7 +563,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS cdr_logs (
 c.execute('''CREATE TABLE IF NOT EXISTS bot_settings (
     key TEXT PRIMARY KEY, value TEXT)''')
 
-# New table for withdrawal requests
 c.execute('''CREATE TABLE IF NOT EXISTS withdraw_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -470,9 +598,10 @@ for key, val in default_settings.items():
     c.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)", (key, val))
 conn.commit()
 
-for col in ['balance', 'withdrawn', 'total_otp', 'remove_cc', 'banned', 'last_bot_message_id', 'keyboard_message_id', 'persistent_message_id', 'total_invites', 'invited_by']:
+# Add missing columns
+for col in ['balance', 'withdrawn', 'total_otp', 'remove_cc', 'banned', 'last_bot_message_id', 'keyboard_message_id', 'persistent_message_id', 'total_invites', 'invited_by', 'last_number_time']:
     try:
-        c.execute(f"ALTER TABLE users ADD COLUMN {col} {'REAL' if col in ['balance','withdrawn'] else 'INTEGER'} DEFAULT 0")
+        c.execute(f"ALTER TABLE users ADD COLUMN {col} {'REAL' if col in ['balance','withdrawn'] else 'INTEGER' if col != 'last_number_time' else 'TEXT'} DEFAULT 0")
     except sqlite3.OperationalError:
         pass
 try:
@@ -521,44 +650,19 @@ SERVICE_SMS_KEYWORDS = {
 
 # ================= COUNTRY HELPERS (using external maps) =================
 def get_country_info_from_code(calling_code):
-    if calling_code in COUNTRY_CODE_MAP:
-        return COUNTRY_CODE_MAP[calling_code]
-    return None, None, None
+    info = resolve_country(code=calling_code)
+    return info.get("iso"), info.get("flag"), info.get("name")
 
 def get_country_from_number(number: str) -> str | None:
-    if not number:
-        return None
-    clean = number.replace('+', '').replace(' ', '').strip()
-    for code in sorted(COUNTRY_CODE_MAP.keys(), key=len, reverse=True):
-        if clean.startswith(code):
-            return COUNTRY_CODE_MAP[code][2]  # name
-    return None
+    info = resolve_country(number=number)
+    return info.get("name")
 
 def get_country_code(country_name):
-    if not country_name:
-        return ""
-    lower = country_name.lower()
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if lower == name.lower() or lower == iso.lower():
-            return iso
-    return country_name.upper()[:2]
+    info = resolve_country(country=country_name)
+    return info.get("iso")
 
 def get_country_flag_html(country_name):
-    """Return <tg-emoji> tag for country flag, fallback to plain flag."""
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if name.lower() == country_name.lower():
-            eid = GLOBAL_BODY_EMOJIS.get(flag)
-            if eid:
-                return f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
-            return flag
-    # fallback: try to find by iso
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if iso.lower() == country_name.lower():
-            eid = GLOBAL_BODY_EMOJIS.get(flag)
-            if eid:
-                return f'<tg-emoji emoji-id="{eid}">{flag}</tg-emoji>'
-            return flag
-    return "🏳️"
+    return country_flag_emoji_tag(country=country_name)
 
 def country_flag_emoji(country_name: str) -> str:
     return get_country_flag_html(country_name)
@@ -662,9 +766,9 @@ def detect_service(message_text, raw_sid=""):
     return "Other"
 
 def get_service_info_html(service_name):
-    app_info = PREMIUM_APPS.get(service_name, {"emoji": "📱", "id": "5465590345108589516"})
-    emoji_id = app_info["id"]
-    normal_emoji = app_info["emoji"]
+    app = get_premium_app(service_name)
+    emoji_id = app.get("id", "")
+    normal_emoji = app.get("emoji", "📱")
     short_name = service_name.upper()
     if short_name == "FACEBOOK": short_name = "FB"
     if short_name == "WHATSAPP": short_name = "WS"
@@ -678,24 +782,18 @@ def extract_otp_code(message_text):
 
 def generate_otp_display(service_name, raw_number, message_text, lang):
     clean_number = str(raw_number).lstrip('+')
-    iso = "XX"
-    flag = "🏳️"
-    name = "Unknown"
-    for code, (iso_val, flag_val, name_val) in COUNTRY_CODE_MAP.items():
-        if clean_number.startswith(code):
-            iso = iso_val
-            flag = flag_val
-            name = name_val
-            break
+    country_info = resolve_country(number=raw_number)
+    iso = country_info.get("iso", "XX")
+    flag = country_info.get("flag", "🏳️")
+    name = country_info.get("name", "Unknown")
+    flag_html = emoji_tag(country_info.get("emoji_id", ""), flag)
 
-    app_info = PREMIUM_APPS.get(service_name, {"emoji": "📱", "id": "5465590345108589516"})
-    service_emoji = app_info["emoji"]
-    service_emoji_id = app_info["id"]
+    app = get_premium_app(service_name)
+    service_emoji = app.get("emoji", "📱")
+    service_emoji_id = app.get("id", "")
 
     first4 = clean_number[:4] if len(clean_number) >= 4 else clean_number
     last3 = clean_number[-3:] if len(clean_number) >= 3 else clean_number
-
-    flag_html = get_country_flag_html(name)
 
     text = (
         f"{flag_html}<b>{iso}</b> | "
@@ -743,7 +841,7 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
     service_html, srv_eid = get_service_info_html(service_name)
     clean_raw_number = str(raw_number).lstrip('+')
-    flag_html = get_country_flag_html(get_country_from_number(raw_number) or "Unknown")
+    flag_html = country_flag_emoji_tag(number=raw_number)
     text = (
         f"— — — — — — — — — —\n"
         f"<blockquote>{service_html} <code>+{clean_raw_number}</code></blockquote>\n"
@@ -914,9 +1012,9 @@ def get_country_name_by_iso(iso2: str) -> str | None:
     for name, info in COUNTRIES_DATA.items():
         if info.get("iso", "").upper() == iso2:
             return name
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if iso.upper() == iso2:
-            return name
+    for code, info in COUNTRY_CODE_MAP.items():
+        if info["iso"].upper() == iso2:
+            return info["name"]
     return None
 
 DEFAULT_EMOJIS = {
@@ -929,9 +1027,7 @@ DEFAULT_EMOJIS = {
 }
 
 def service_emoji_tag(service_name: str) -> str:
-    row = db_fetch_one("SELECT emoji_id FROM services WHERE LOWER(name) = LOWER(?)", (service_name,))
-    eid = row[0] if row and row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
-    return emoji_tag(eid, "⚙️")
+    return service_premium_tag(service_name)
 
 # ================= FORMAT NUMBERS =================
 def format_numbers_message(country, service, numbers, user_id=None, first_name=None):
@@ -942,22 +1038,20 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
         row = db_fetch_one("SELECT remove_cc FROM users WHERE user_id=?", (user_id,))
         if row:
             remove_cc = row[0] or 0
-    flag_html = get_country_flag_html(country)
+    flag_html = country_flag_emoji_tag(country=country)
     country_code = get_country_info(country).get("code", "")
-    service_eid_row = db_fetch_one("SELECT emoji_id FROM services WHERE LOWER(name) = LOWER(?)", (service,))
-    service_eid = service_eid_row[0] if service_eid_row and service_eid_row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
+    service_eid = get_premium_app(service).get("id", "")
     phone_icon_id = "5197474438970363734"
     header = (
         f'{emoji_tag(HEADER_EMOJI_1, "⚙️")} <b>THIS IS YOUR</b> '
-        f'{emoji_tag(HEADER_EMOJI_2, "📱")} <b>{country.upper()}</b> '
+        f'{emoji_tag(HEADER_EMOJI_2, "📱")} <b>{html.escape(country.upper())}</b> '
         f'{flag_html} <b>NUMBERS</b> {emoji_tag(phone_icon_id, "📱")}\n\n'
     )
     rows = []
     flag_unicode = "🏳"
-    for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-        if name.lower() == country.lower():
-            flag_unicode = flag
-            break
+    info = resolve_country(country=country)
+    if info:
+        flag_unicode = info.get("flag", "🏳")
     for number in numbers:
         display_num = number
         copy_num = number
@@ -993,9 +1087,8 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
     return header, InlineKeyboardMarkup(rows)
 
 def stock_added_message(country, service, count):
-    flag_html = get_country_flag_html(country)
-    svc_eid_row = db_fetch_one("SELECT emoji_id FROM services WHERE name = ?", (service,))
-    svc_eid = svc_eid_row[0] if svc_eid_row and svc_eid_row[0] else CUSTOM_EMOJIS.get("DEFAULT_SERVICE", "")
+    flag_html = country_flag_emoji_tag(country=country)
+    svc_eid = get_premium_app(service).get("id", "")
     payout = get_country_info(country).get("payout", "0.001$")
     EMOJI_EYE = "4958617898751886363"
     EMOJI_PACKAGE = "5463412319948148591"
@@ -1010,8 +1103,8 @@ def stock_added_message(country, service, count):
         f'{emoji_tag(EMOJI_PACKAGE, "📦")} <b>ADDED SUCCESSFULLY</b> '
         f'{emoji_tag(EMOJI_CHECK, "✅")}\n\n'
         f'<b>NUMBER</b> {emoji_tag(EMOJI_NUMBER, "📱")} : <code>{count}</code>\n'
-        f'<b>COUNTRY</b> {emoji_tag(EMOJI_COUNTRY, "🌍")} : {flag_html} <b>{country}</b>\n'
-        f'<b>SERVICE</b> {emoji_tag(EMOJI_SERVICE, "🔧")} : {emoji_tag(svc_eid, "⚙️")} <b>{service}</b>\n'
+        f'<b>COUNTRY</b> {emoji_tag(EMOJI_COUNTRY, "🌍")} : {flag_html} <b>{html.escape(country)}</b>\n'
+        f'<b>SERVICE</b> {emoji_tag(EMOJI_SERVICE, "🔧")} : {emoji_tag(svc_eid, "⚙️")} <b>{html.escape(service)}</b>\n'
         f'<b>PAYOUT</b> {emoji_tag(EMOJI_PAYOUT, "💰")} : <code>{payout}</code> {emoji_tag(EMOJI_COIN, "🪙")}'
     )
 
@@ -1064,11 +1157,12 @@ def services_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row = []
     for s in services:
+        app = get_premium_app(s[0])
         btn = InlineKeyboardButton(
             text=s[1],
             callback_data=f"svc_sel|{s[0]}",
             style=KBS.PRIMARY,
-            icon_custom_emoji_id=safe_icon(s[2]) if s[2] else None
+            icon_custom_emoji_id=safe_icon(app.get("id", ""))
         )
         row.append(btn)
         if len(row) == 2:
@@ -1089,14 +1183,17 @@ def countries_for_service_keyboard(service: str) -> InlineKeyboardMarkup:
         return back_to_main_keyboard()
     rows = []
     for name, stock in countries:
-        flag_html = get_country_flag_html(name)
+        flag_html = country_flag_emoji_tag(country=name)
         payout = get_country_info(name).get("payout", "0.001$")
         label = f"{name} — {payout} — ({stock})"
+        # Extract emoji_id from flag_html
+        match = re.search(r'emoji-id="(\d+)"', flag_html)
+        icon_id = match.group(1) if match else None
         rows.append([InlineKeyboardButton(
             label,
             callback_data=f"cnt_sel|{name}|{service}",
             style=KBS.SUCCESS,
-            icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else ''))
+            icon_custom_emoji_id=safe_icon(icon_id)
         )])
     rows.append([InlineKeyboardButton("Back to Services", callback_data="menu_get_number", style=KBS.PRIMARY,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
@@ -1265,9 +1362,9 @@ def air_otp_control_keyboard():
                               icon_custom_emoji_id=safe_icon("5395444784611480792"))]
     ]
     for srv_name, rate in service_rates.items():
-        app_info = PREMIUM_APPS.get(srv_name, {"emoji": "📱", "id": "5465590345108589516"})
+        app = get_premium_app(srv_name)
         rows.append([InlineKeyboardButton(f"Delete: {srv_name} ({rate})", callback_data=f"del_srv_rate_{srv_name}", style=KBS.DANGER,
-                                          icon_custom_emoji_id=safe_icon(app_info['id']))])
+                                          icon_custom_emoji_id=safe_icon(app.get("id", "")))])
     rows.append([InlineKeyboardButton("BACK", callback_data="admin_air_control", style=KBS.DANGER,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     return InlineKeyboardMarkup(rows)
@@ -1463,12 +1560,12 @@ def start_welcome_html():
 # ================= SEND MESSAGES =================
 async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, parse_mode=None, auto_delete: bool = False, delete_after: int = None):
     user_id = update.effective_user.id
-    text = apply_emojis(text)
+    final_text = apply_emojis(text)
     try:
-        sent = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        sent = await context.bot.send_message(chat_id=user_id, text=final_text, reply_markup=reply_markup, parse_mode=parse_mode)
     except BadRequest as e:
         if "Entity_text_invalid" in str(e) or "Parse" in str(e):
-            sent = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
+            sent = await context.bot.send_message(chat_id=user_id, text=final_text, reply_markup=reply_markup)
         else:
             raise
     db_exec("UPDATE users SET last_bot_message_id=? WHERE user_id=?", (sent.message_id, user_id))
@@ -1480,7 +1577,6 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")} <b>Main Menu</b>'
-    main_text = apply_emojis(main_text)
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1488,9 +1584,9 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
 
 async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse_mode=None, context: ContextTypes.DEFAULT_TYPE = None, auto_delete: bool = False, delete_after: int = None):
     user_id = query.from_user.id
-    text = apply_emojis(text)
+    final_text = apply_emojis(text)
     try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await query.edit_message_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
         if delete_after:
             await schedule_delete(context, query.message.chat_id, query.message.message_id, delete_after)
         return None
@@ -1505,7 +1601,7 @@ async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse
             try:
                 sent = await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=text,
+                    text=final_text,
                     reply_markup=reply_markup
                 )
             except:
@@ -1523,19 +1619,19 @@ async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse
         return None
 
 async def reply_or_edit(target, text: str, reply_markup=None, parse_mode=None, context: ContextTypes.DEFAULT_TYPE = None, auto_delete: bool = False, delete_after: int = None):
-    text = apply_emojis(text)
+    final_text = apply_emojis(text)
     if isinstance(target, CallbackQuery):
-        await edit_or_send(target, text, reply_markup=reply_markup, parse_mode=parse_mode, context=context, auto_delete=auto_delete, delete_after=delete_after)
+        await edit_or_send(target, final_text, reply_markup=reply_markup, parse_mode=parse_mode, context=context, auto_delete=auto_delete, delete_after=delete_after)
     elif hasattr(target, 'callback_query') and target.callback_query:
-        await edit_or_send(target.callback_query, text, reply_markup=reply_markup, parse_mode=parse_mode, context=context, auto_delete=auto_delete, delete_after=delete_after)
+        await edit_or_send(target.callback_query, final_text, reply_markup=reply_markup, parse_mode=parse_mode, context=context, auto_delete=auto_delete, delete_after=delete_after)
     else:
         if context:
-            await send_clean_message(target, context, text, reply_markup=reply_markup, parse_mode=parse_mode, auto_delete=auto_delete, delete_after=delete_after)
+            await send_clean_message(target, context, final_text, reply_markup=reply_markup, parse_mode=parse_mode, auto_delete=auto_delete, delete_after=delete_after)
         else:
             if hasattr(target, 'message'):
-                await target.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                await target.message.reply_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
             elif hasattr(target, 'edit_message_text'):
-                await target.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+                await target.edit_message_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1680,7 +1776,7 @@ async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TY
     emoji_inbox = "5197288647275071607"
     text = (
         f'{emoji_tag(CUSTOM_EMOJIS["PROFILE_ICON"], "👤")} '
-        f'<a href="tg://user?id={user_id}">{first_name}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
+        f'<a href="tg://user?id={user_id}">{html.escape(first_name)}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
         f'------------------------------------------------\n'
         f'{emoji_tag(emoji_id, "🆔")} USER ID: <code>{user_id}</code>\n'
         f'{emoji_tag(emoji_money, "💰")} BALANCE: <code>${balance:.3f}</code>\n'
@@ -1874,7 +1970,6 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
     if not is_super_admin(user_id):
         await query.answer("⚠️ Access Denied! You cannot perform this action.", show_alert=True)
         return
-    # data format: admin_w_approve|request_id or admin_w_reject|request_id
     parts = data.split('|')
     if len(parts) != 2:
         await query.answer("Invalid request.", show_alert=True)
@@ -2673,20 +2768,22 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return True
             name, code, iso, payout = parts[0], parts[1], parts[2].upper(), parts[3]
             emoji_id = parts[4] if len(parts) >= 5 else ""
-            # If emoji_id is empty, try to resolve from COUNTRY_CODE_MAP and GLOBAL_BODY_EMOJIS
+            # If emoji_id is empty, try to resolve from COUNTRY_CODE_MAP and GLOBAL_EMOJI
             if not emoji_id:
                 # Try to find the flag from code
-                for c_code, (c_iso, c_flag, c_name) in COUNTRY_CODE_MAP.items():
-                    if c_code == code.lstrip('+') or c_name.lower() == name.lower():
-                        eid = GLOBAL_BODY_EMOJIS.get(c_flag)
+                for c_code, info in COUNTRY_CODE_MAP.items():
+                    if c_code == code.lstrip('+') or info["name"].lower() == name.lower():
+                        flag = info["flag"]
+                        eid = GLOBAL_BODY_EMOJIS.get(flag, "")
                         if eid:
                             emoji_id = eid
                         break
                 # If still empty, try by name
                 if not emoji_id:
-                    for c_code, (c_iso, c_flag, c_name) in COUNTRY_CODE_MAP.items():
-                        if c_name.lower() == name.lower():
-                            eid = GLOBAL_BODY_EMOJIS.get(c_flag)
+                    for c_code, info in COUNTRY_CODE_MAP.items():
+                        if info["name"].lower() == name.lower():
+                            flag = info["flag"]
+                            eid = GLOBAL_BODY_EMOJIS.get(flag, "")
                             if eid:
                                 emoji_id = eid
                             break
@@ -2714,9 +2811,10 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji_id = parts[3] if len(parts) >= 4 else ""
             if not emoji_id:
                 # try to resolve
-                for c_code, (c_iso, c_flag, c_name) in COUNTRY_CODE_MAP.items():
-                    if c_code == code.lstrip('+') or c_iso == iso:
-                        eid = GLOBAL_BODY_EMOJIS.get(c_flag)
+                for c_code, info in COUNTRY_CODE_MAP.items():
+                    if c_code == code.lstrip('+') or info["iso"] == iso:
+                        flag = info["flag"]
+                        eid = GLOBAL_BODY_EMOJIS.get(flag, "")
                         if eid:
                             emoji_id = eid
                         break
@@ -2874,13 +2972,19 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
         return
     # Cooldown check
     cooldown = int(get_setting('cooldown', 5))
-    last_time = user_cooldowns.get(user_id)
-    if last_time:
-        elapsed = (datetime.now() - last_time).total_seconds()
-        remaining = cooldown - elapsed
-        if remaining > 0:
-            await query.answer(f"⌚Wait {int(remaining)}s To Get Another Numbers ✅", show_alert=True)
-            return
+    # Check DB last_number_time
+    row = db_fetch_one("SELECT last_number_time FROM users WHERE user_id=?", (user_id,))
+    last_time_str = row[0] if row else None
+    if last_time_str:
+        try:
+            last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+            elapsed = (datetime.now() - last_time).total_seconds()
+            remaining = cooldown - elapsed
+            if remaining > 0:
+                await query.answer(f"⌚Wait {int(math.ceil(remaining))}s To Get Another Numbers ✅", show_alert=True)
+                return
+        except:
+            pass
     await query.answer("Getting numbers...")
     parts = query.data.split('|')
     if len(parts) < 3:
@@ -2893,8 +2997,9 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     if not numbers:
         await query.answer("No numbers available right now!", show_alert=True)
         return
-    # Update cooldown
-    user_cooldowns[user_id] = datetime.now()
+    # Update cooldown in DB
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
     old_data = last_activation_data.get(user_id)
     if old_data:
         old_msg_id = old_data[3]
@@ -2933,8 +3038,8 @@ async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country_info = get_country_info(country_name)
     country_code = country_info.get("code", "")
     if not country_code:
-        for code, (iso, flag, name) in COUNTRY_CODE_MAP.items():
-            if iso.upper() == iso2:
+        for code, info in COUNTRY_CODE_MAP.items():
+            if info["iso"].upper() == iso2:
                 country_code = "+" + code
                 break
     if not country_code:
@@ -3051,7 +3156,7 @@ async def service_selection_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     service = query.data.split('|', 1)[1]
     db_exec("UPDATE users SET current_service = ? WHERE user_id = ?", (service, user_id))
-    text = f'{emoji_tag(CUSTOM_EMOJIS["SELECT_COUNTRY_PREFIX"], "🌍")} <b>Select country for {service.upper()}</b> {service_emoji_tag(service)}'
+    text = f'{emoji_tag(CUSTOM_EMOJIS["SELECT_COUNTRY_PREFIX"], "🌍")} <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
     await edit_or_send(query, text, reply_markup=countries_for_service_keyboard(service), parse_mode='HTML', context=context, auto_delete=False)
 
 async def country_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3255,10 +3360,10 @@ async def stock_remove_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     kb_buttons = []
     for country, service, stock in rows:
-        flag_html = get_country_flag_html(country)
+        flag_html = country_flag_emoji_tag(country=country)
         label = f"{country} — {service} (Stock: {stock})"
         cb_data = f"stock_remove_confirm|{country}|{service}"
-        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=KBS.DANGER, icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
+        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=KBS.DANGER, icon_custom_emoji_id=safe_icon(flag_html) if flag_html else None)])
     kb_buttons.append([InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await edit_or_send(query, "Select stock to remove:", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML', context=context, auto_delete=False)
 
@@ -3270,8 +3375,8 @@ async def stock_remove_confirm_callback(update: Update, context: ContextTypes.DE
         return
     await query.answer()
     _, country, service = query.data.split('|')
-    flag_html = get_country_flag_html(country)
-    text = f'Do you want to remove all numbers for {flag_html} <b>{country}</b> with service {service_emoji_tag(service)}?'
+    flag_html = country_flag_emoji_tag(country=country)
+    text = f'Do you want to remove all numbers for {flag_html} <b>{html.escape(country)}</b> with service {service_premium_tag(service)}?'
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("YES", callback_data=f"stock_remove_yes|{country}|{service}", style=KBS.SUCCESS, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("YES", "")))],
         [InlineKeyboardButton("NO", callback_data="stock_remove_no", style=KBS.DANGER, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("NO", "")))]
@@ -3313,8 +3418,8 @@ async def stock_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         lines = []
         for country, service, stock in rows:
             payout = get_country_info(country).get("payout", "0.001$")
-            flag_html = get_country_flag_html(country)
-            line = f'{service_emoji_tag(service)}|{flag_html}<b>{country}</b>|<code>{payout}</code>|{stock}'
+            flag_html = country_flag_emoji_tag(country=country)
+            line = f'{service_premium_tag(service)}|{flag_html}<b>{html.escape(country)}</b>|<code>{payout}</code>|{stock}'
             lines.append(line)
         text = "\n".join(lines)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))]])
@@ -3333,11 +3438,11 @@ async def stock_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     kb_buttons = []
     for country, service, active in rows:
-        flag_html = get_country_flag_html(country)
+        flag_html = country_flag_emoji_tag(country=country)
         label = f"{country} — {service}"
         cb_data = f"stock_toggle_do|{country}|{service}"
         style = KBS.SUCCESS if active else KBS.DANGER
-        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=style, icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
+        kb_buttons.append([InlineKeyboardButton(label, callback_data=cb_data, style=style, icon_custom_emoji_id=safe_icon(flag_html) if flag_html else None)])
     kb_buttons.append([InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await edit_or_send(query, "Select stock to toggle active status:", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML', context=context, auto_delete=False)
 
@@ -3385,8 +3490,8 @@ async def show_admin_stats(update: Update, user_id, context: ContextTypes.DEFAUL
     if countries:
         text += f'\n\n{emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")} STOCK DETAILS {emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")}:\n'
         for name, service, stock_count in countries:
-            flag_html = get_country_flag_html(name)
-            text += f'In stock {flag_html} {name} — {service_emoji_tag(service)}: {stock_count}\n'
+            flag_html = country_flag_emoji_tag(country=name)
+            text += f'In stock {flag_html} {name} — {service_premium_tag(service)}: {stock_count}\n'
     await reply_or_edit(update, text, reply_markup=admin_back_button(), parse_mode='HTML', context=context, auto_delete=False)
 
 async def show_delete_options(query, user_id, context: ContextTypes.DEFAULT_TYPE):
@@ -3396,7 +3501,7 @@ async def show_delete_options(query, user_id, context: ContextTypes.DEFAULT_TYPE
         return
     rows = []
     for name, service, stock_count in countries:
-        flag_html = get_country_flag_html(name)
+        flag_html = country_flag_emoji_tag(country=name)
         rows.append([InlineKeyboardButton(f"Delete {flag_html} {name} — {service} (Stock: {stock_count})",
                                           callback_data=f"admin_del|{name}|{service}",
                                           style=KBS.DANGER,
@@ -3682,7 +3787,7 @@ async def country_add_start(update: Update, user_id, context: ContextTypes.DEFAU
 async def country_list_show(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     lines = [f'ALL COUNTRIES {emoji_tag(CUSTOM_EMOJIS["CHANGE_COUNTRY"], "🌍")}', '']
     for name, info in COUNTRIES_DATA.items():
-        flag_html = get_country_flag_html(name)
+        flag_html = country_flag_emoji_tag(country=name)
         lines.append(f'• {flag_html} {name}')
         lines.append(f'  Code: {info["code"]} | ISO: {info["iso"]} | Payout: {info.get("payout", "0.001$")} | Emoji ID: {info.get("emoji_id") or "Not set"}')
         lines.append('')
@@ -3691,11 +3796,11 @@ async def country_list_show(update: Update, user_id, context: ContextTypes.DEFAU
 async def country_edit_select(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     rows = []
     for name, info in COUNTRIES_DATA.items():
-        flag_html = get_country_flag_html(name)
+        flag_html = country_flag_emoji_tag(country=name)
         rows.append([InlineKeyboardButton(f"{flag_html} {name} (Payout: {info.get('payout','0.001$')})",
                                           callback_data=f"country_edit|{name}",
                                           style=KBS.PRIMARY,
-                                          icon_custom_emoji_id=safe_icon(GLOBAL_BODY_EMOJIS.get(flag_html if flag_html.startswith('<') else '')))])
+                                          icon_custom_emoji_id=safe_icon(flag_html) if flag_html else None)])
     rows.append([InlineKeyboardButton("Back", callback_data="admin_country_manager", style=KBS.PRIMARY,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     await reply_or_edit(update, "Select country to edit:", reply_markup=InlineKeyboardMarkup(rows), context=context, auto_delete=False)
@@ -3711,7 +3816,7 @@ async def country_edit_start(update: Update, user_id, country_name, context: Con
 async def country_delete_select(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
     rows = []
     for name in COUNTRIES_DATA:
-        flag_html = get_country_flag_html(name)
+        flag_html = country_flag_emoji_tag(country=name)
         rows.append([InlineKeyboardButton(f"Delete {flag_html} {name}", callback_data=f"country_delete|{name}",
                                           style=KBS.DANGER,
                                           icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("DELETE", "")))])
@@ -3737,8 +3842,9 @@ async def country_add_service_selection(update: Update, user_id, country_name, c
     services = db_fetch_all("SELECT name, display_name, emoji_id FROM services WHERE active = 1 ORDER BY name")
     rows = []
     for s in services:
+        app = get_premium_app(s[0])
         rows.append([InlineKeyboardButton(s[1], callback_data=f"cnt_add_svc|{country_name}|{s[0]}", style=KBS.PRIMARY,
-                                          icon_custom_emoji_id=safe_icon(s[2]) if s[2] else None)])
+                                          icon_custom_emoji_id=safe_icon(app.get("id", "")))])
     rows.append([InlineKeyboardButton("Skip", callback_data="admin_back", style=KBS.PRIMARY,
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     kb = InlineKeyboardMarkup(rows)
@@ -3982,7 +4088,7 @@ async def send_balance_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     emoji_inbox = "5197288647275071607"
     text = (
         f'{emoji_tag(CUSTOM_EMOJIS["PROFILE_ICON"], "👤")} '
-        f'<a href="tg://user?id={user_id}">{first_name}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
+        f'<a href="tg://user?id={user_id}">{html.escape(first_name)}</a> YOUR DETAILS {emoji_tag(emoji_clipboard, "📋")}\n'
         f'------------------------------------------------\n'
         f'{emoji_tag(emoji_id, "🆔")} USER ID: <code>{user_id}</code>\n'
         f'{emoji_tag(emoji_money, "💰")} BALANCE: <code>${balance:.3f}</code>\n'
