@@ -308,7 +308,7 @@ WELCOME_WAVE = "5199885118214255386"
 WELCOME_THINK = "5314563983422798645"
 INBOX_EMOJI = "5472239203590888751"
 MONEY_EMOJI = "5805602131176069048"
-MAIN_MENU_EMOJI = "6267186570034419608"   # UPDATED
+MAIN_MENU_EMOJI = "6267186570034419608"   # UPDATED but will be replaced with plain text
 HEADER_EMOJI_1 = "6282641460093260838"
 HEADER_EMOJI_2 = "6267315814190290529"
 SUPPORT_EMOJI = "6264853036993090338"
@@ -1547,7 +1547,7 @@ def start_welcome_html():
     think = emoji_tag(WELCOME_THINK, "🤔")
     inbox = emoji_tag(INBOX_EMOJI, "📩")
     money = emoji_tag(MONEY_EMOJI, "🤑")
-    block = blockquote(f"{wave} <b>WELCOME TO OUR 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓</b> {think}")
+    block = blockquote(f"{wave} <b>WELCOME TO OUR 𝐀𝐈𝐑 𝐍𝐔𝐌𝐁𝐄𝐑 𝐁𝐎𝐓</b> {think}")
     sub = f'<b>{inbox} RECEIVE OTP\'S AND START EARNING MONEY {money}</b>'
     return f'{block}\n{sub}'
 
@@ -1570,8 +1570,8 @@ async def send_clean_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return sent
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    # New format: <tg-emoji emoji-id="6267186570034419608">📱</tg-emoji> <b>MAIN MENU</b>
-    main_text = f'{emoji_tag(MAIN_MENU_EMOJI, "📱")} <b>MAIN MENU</b>'
+    # Changed to plain text: 🏠<b>Main Menu</b>
+    main_text = '🏠<b>Main Menu</b>'
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', context=context, auto_delete=False)
     else:
@@ -1817,10 +1817,10 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
     balance = balance[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        # Low balance – show popup (if callback)
+        # Low balance – show popup if it's a callback
         first_name = update.effective_user.first_name or "User"
         need = min_w - balance
-        popup_text = f"⚠️ {first_name} Your Balance Is Low.\n🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
+        popup_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
         if isinstance(update, CallbackQuery):
             await update.answer(popup_text, show_alert=True)
             return
@@ -1861,7 +1861,7 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     if balance < min_w:
         first_name = query.from_user.first_name or "User"
         need = min_w - balance
-        popup_text = f"⚠️ {first_name} Your Balance Is Low.\n🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
+        popup_text = f"⚠️ {first_name} Your Balance Is Low.🔥 You Need {need:.2f}$ 💸 To Withdraw 👍🏻"
         await query.answer(popup_text, show_alert=True)
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
@@ -1969,7 +1969,9 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
                 await context.bot.send_message(chat_id=admin_id, text=apply_emojis(w_msg), reply_markup=w_markup, parse_mode='HTML')
             except Exception as e:
                 print(f"Failed to send to admin {admin_id}: {e}")
+    # User confirmation message with heading
     success_msg = (
+        f"<tg-emoji emoji-id=\"5420396762189831222\">🆕</tg-emoji> <b>WITHDRAW REQUEST SUBMITTED</b>\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"<tg-emoji emoji-id=\"5429612421977253466\">💵</tg-emoji> <b>Amount:</b> ${amount:.2f}\n"
         f"— — — — — — — — — —\n"
@@ -1994,7 +1996,8 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     user_id = query.from_user.id
     data = query.data
-    if not is_super_admin(user_id):
+    # Permission: now any admin (not just super admin) can approve/cancel
+    if not is_admin(user_id):
         await query.answer("🫵 YOU ARE NOT A ADMIN 🫅 \n ACCESS DENIED ❌", show_alert=True)
         return
     parts = data.split('|')
@@ -2056,7 +2059,7 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ================= SHOW SUPPORT/INVITE =================
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
+    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: ＲＡＫＥＳＨ"
     if isinstance(update, CallbackQuery):
         user_id = update.effective_user.id
         await edit_or_send(update, text, reply_markup=support_keyboard(), context=context, auto_delete=False)
@@ -2096,7 +2099,7 @@ async def enter_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_admin(user_id):
         admin_mode[user_id] = True
         admin_panel_state[user_id] = "main"
-        await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), auto_delete=False)
+        await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), auto_delete=False)
     else:
         await update.message.reply_text("Unauthorized access!")
 
@@ -2175,7 +2178,7 @@ async def admin_panel_menu(update: Update, user_id, context: ContextTypes.DEFAUL
         return
     admin_mode[user_id] = True
     admin_panel_state[user_id] = "main"
-    text = "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:"
+    text = "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:"
     if isinstance(update, CallbackQuery):
         await edit_or_send(update, text, reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     else:
@@ -3353,7 +3356,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "back":
         # Return to admin panel
         admin_panel_state[user_id] = "main"
-        await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
+        await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     elif action == "stock_management":
         await stock_management_menu(query, context, user_id)
 
@@ -4149,7 +4152,7 @@ async def send_balance_panel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def send_support_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
+    text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: ＲＡＫＥＳＨ"
     sent_inline = await context.bot.send_message(chat_id=user_id, text=apply_emojis(text), reply_markup=support_keyboard())
     db_exec("UPDATE users SET last_bot_message_id=? WHERE user_id=?", (sent_inline.message_id, user_id))
 
@@ -4160,7 +4163,7 @@ async def send_admin_panel_msg(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     admin_mode[user_id] = True
     admin_panel_state[user_id] = "main"
-    await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓", reply_markup=admin_panel_keyboard(), auto_delete=False)
+    await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: ＲＡＫＥＳＨ", reply_markup=admin_panel_keyboard(), auto_delete=False)
 
 # ================= MISSING FUNCTIONS =================
 def get_numbers_from_stock(country, service, count):
