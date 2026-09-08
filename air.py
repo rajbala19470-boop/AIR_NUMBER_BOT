@@ -6621,46 +6621,46 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
     semaphore = asyncio.Semaphore(50)
     new_otp_count = 0
 
-    # ==== UPDATED safe_send_message with fallback ====
+    # ==== UPDATED safe_send_message with fallback and dict handling ====
     async def safe_send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
-    async with semaphore:
-        try:
-            text = apply_emojis(text)
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-        except BadRequest as e:
-            if "invalid custom emoji identifier" in str(e):
-                # Strip <tg-emoji> tags
-                cleaned_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text, flags=re.DOTALL)
-                cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        async with semaphore:
+            try:
+                text = apply_emojis(text)
+                await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            except BadRequest as e:
+                if "invalid custom emoji identifier" in str(e):
+                    # Strip <tg-emoji> tags
+                    cleaned_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text, flags=re.DOTALL)
+                    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
 
-                # Remove icon_custom_emoji_id from inline buttons
-                if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
-                    new_keyboard = []
-                    for row in reply_markup.inline_keyboard:
-                        new_row = []
-                        for btn in row:
-                            # Handle both dict and InlineKeyboardButton objects
-                            if isinstance(btn, dict):
-                                # Create a new dict without icon_custom_emoji_id
-                                btn_dict = {k: v for k, v in btn.items() if k != 'icon_custom_emoji_id'}
-                                new_btn = InlineKeyboardButton(**btn_dict)
-                            else:
-                                # btn is an InlineKeyboardButton object
-                                new_btn = InlineKeyboardButton(
-                                    text=btn.text,
-                                    callback_data=btn.callback_data if hasattr(btn, 'callback_data') else None,
-                                    url=btn.url if hasattr(btn, 'url') else None,
-                                    copy_text=btn.copy_text if hasattr(btn, 'copy_text') else None,
-                                    style=btn.style if hasattr(btn, 'style') else None,
-                                    # icon_custom_emoji_id is intentionally omitted
-                                )
-                            new_row.append(new_btn)
-                        new_keyboard.append(new_row)
-                    reply_markup = InlineKeyboardMarkup(new_keyboard)
+                    # Remove icon_custom_emoji_id from inline buttons
+                    if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
+                        new_keyboard = []
+                        for row in reply_markup.inline_keyboard:
+                            new_row = []
+                            for btn in row:
+                                # Handle both dict and InlineKeyboardButton objects
+                                if isinstance(btn, dict):
+                                    # Create a new dict without icon_custom_emoji_id
+                                    btn_dict = {k: v for k, v in btn.items() if k != 'icon_custom_emoji_id'}
+                                    new_btn = InlineKeyboardButton(**btn_dict)
+                                else:
+                                    # btn is an InlineKeyboardButton object
+                                    new_btn = InlineKeyboardButton(
+                                        text=btn.text,
+                                        callback_data=btn.callback_data if hasattr(btn, 'callback_data') else None,
+                                        url=btn.url if hasattr(btn, 'url') else None,
+                                        copy_text=btn.copy_text if hasattr(btn, 'copy_text') else None,
+                                        style=btn.style if hasattr(btn, 'style') else None,
+                                        # icon_custom_emoji_id is intentionally omitted
+                                    )
+                                new_row.append(new_btn)
+                            new_keyboard.append(new_row)
+                        reply_markup = InlineKeyboardMarkup(new_keyboard)
 
-                await bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=reply_markup, parse_mode=None)
-            else:
-                raise
+                    await bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=reply_markup, parse_mode=None)
+                else:
+                    raise
 
     # ==== UPDATED process_single_otp with deduplication ====
     seen_otps = set()   # local dedup within same batch
