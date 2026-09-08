@@ -1270,7 +1270,7 @@ def stock_management_menu_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(rows)
 
-# ================= AIR CONTROL KEYBOARDS =================
+# ================= AIR CONTROL KEYBOARDS (copied from test.py) =================
 def air_control_keyboard():
     min_w = get_setting('min_withdraw', '10.0')
     ref_r = get_setting('refer_reward', '0.2')
@@ -1367,7 +1367,7 @@ def manage_w_methods_keyboard():
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     return InlineKeyboardMarkup(rows)
 
-# ================= OTP GROUP KEYBOARD =================
+# ================= OTP GROUP KEYBOARD (copied from test.py) =================
 def get_otp_group_keyboard():
     rows = []
 
@@ -1433,7 +1433,7 @@ def get_otp_group_keyboard():
 
     return InlineKeyboardMarkup(rows)
 
-# ================= FORCE JOIN KEYBOARD =================
+# ================= FORCE JOIN KEYBOARD (copied from test.py) =================
 def get_force_join_keyboard():
     rows = []
 
@@ -1744,7 +1744,7 @@ async def show_get_number(update: Update, context, user_id, first_name):
     else:
         await send_clean_message(update, context, text, reply_markup=services_keyboard(), parse_mode='HTML', auto_delete=False)
 
-# ================= BALANCE & WITHDRAW =================
+# ================= BALANCE & WITHDRAW (fixed) =================
 async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE = None):
     ensure_user(user_id, update.effective_user.username, update.effective_user.first_name)
     user = db_fetch_one("SELECT first_name, balance, withdrawn, total_otp FROM users WHERE user_id = ?", (user_id,))
@@ -1829,12 +1829,16 @@ async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYP
     balance = user_data[0] or 0.0
     min_w = float(get_setting('min_withdraw', '10.0'))
     if balance < min_w:
-        first_name = query.from_user.first_name or "User"
-        remaining = min_w - balance
-        await query.answer(
-            f"⚠️ {first_name} YOUR BALANCE IS LOW 😅\nYou Need ${remaining:.2f}",
-            show_alert=True
+        # Show low balance message instead of alert
+        need = round(min_w - balance, 3)
+        text = (
+            f'{emoji_tag("4956611513369494230", "🔻")} YOUR MAIN BALANCE IS LOW{emoji_tag("4956387556594811916", "😞")}\n\n'
+            f'{emoji_tag("4958534696645428119", "⚠️")} MINIMUM WITHDRAW: ${min_w}\n'
+            f'{emoji_tag("4958926882994127612", "💰")} YOUR CURRENT BALANCE: ${balance:.3f}\n'
+            f'{emoji_tag("4958642964181025908", "🧾")} NEED: ${need:.3f}\n\n'
+            f'{emoji_tag("4958503072801228000", "📢")} KINDLY GRAB SOME OTP TO WITHDRAW YOU BALANCE {emoji_tag("4956721670690702265", "✅")}'
         )
+        await edit_or_send(query, text, reply_markup=None, parse_mode='HTML', context=context, auto_delete=False)
         return
     user_states[user_id] = {"state": f"waiting_withdraw_amount_{method}", "msg_id": query.message.message_id}
     await edit_or_send(query, f"💳 <b>Withdraw via {method}</b>\n\n💵 Your Balance: ${balance:.2f}\n💬 <b>Enter the amount you want to withdraw:</b>",
@@ -4128,7 +4132,7 @@ async def send_admin_panel_msg(update: Update, context: ContextTypes.DEFAULT_TYP
     admin_panel_state[user_id] = "main"
     await send_clean_message(update, context, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓", reply_markup=admin_panel_keyboard(), auto_delete=False)
 
-# ================= CURL PARSER =================
+# ================= CURL PARSER (unchanged) =================
 import re
 import json
 from urllib.parse import urlparse, parse_qs
@@ -4267,7 +4271,7 @@ def build_request_from_curl(parsed: dict, placeholders: dict = None) -> dict:
             "data": data, "base_url": parsed.get("base_url", ""), "endpoint": parsed.get("endpoint", ""),
             "placeholders": placeholders}
 
-# ================= API ADD STEPS =================
+# ================= API ADD STEPS (unchanged) =================
 STEP_ORDER = [
     "api_add_name", "api_add_base_url", "api_add_endpoint", "api_add_token",
     "api_add_interval", "api_add_otp_list_path", "api_add_number_path",
@@ -4915,7 +4919,7 @@ async def api_choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await cdr_add_start(update, context, user_id)
 
-# ================= CDR PANEL MANAGEMENT =================
+# ================= CDR PANEL MANAGEMENT (unchanged) =================
 async def _solve_captcha(page) -> str | None:
     body_text = await page.locator("body").inner_text()
     match = re.search(r"(\d+)\s*([\+\-])\s*(\d+)", body_text)
