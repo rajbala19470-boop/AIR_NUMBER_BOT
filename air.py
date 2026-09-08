@@ -1,7 +1,7 @@
 # THIS PREMIUM BOT IS DEVELOPED BY RAKESH DEV
 # TG: @SR_ADMIN_RAKESH
 
-import asyncio, json, os, re, sqlite3, threading, tempfile, zipfile, shutil, sys, logging, math
+import asyncio, json, os, re, sqlite3, threading, tempfile, zipfile, shutil, sys, logging, math, time
 from datetime import datetime, timedelta
 import random
 import html
@@ -1581,7 +1581,7 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         await send_clean_message(update, context, main_text, reply_markup=bottom_menu_keyboard(user_id), parse_mode='HTML', auto_delete=False)
 
 async def edit_or_send(query: CallbackQuery, text: str, reply_markup=None, parse_mode=None, context: ContextTypes.DEFAULT_TYPE = None, auto_delete: bool = False, delete_after: int = None):
-    user_id = query.from_user.id
+    user_id = query.from_user.id  # Fix: use query.from_user
     final_text = apply_emojis(text)
     try:
         await query.edit_message_text(final_text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -2064,7 +2064,7 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     text = "CONTACT SUPPORT\n\n━━━━━━━━━━━━━━━━━━━━\nFor any issues, contact admin directly.\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓"
     if isinstance(update, CallbackQuery):
-        user_id = update.effective_user.id
+        user_id = update.from_user.id
         await edit_or_send(update, text, reply_markup=support_keyboard(), context=context, auto_delete=False)
     else:
         if context:
@@ -3014,7 +3014,7 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
-        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
         return
     await query.answer("Getting numbers...")
     parts = query.data.split('|')
@@ -3197,26 +3197,51 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
         return
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
+
     # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
-        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
         return
-    await query.answer("Allocating numbers...")
+
     parts = query.data.split('|')
     if len(parts) < 3:
         await query.answer("Invalid selection.", show_alert=True)
         return
+
     country = parts[1]
     service = parts[2]
+
+    # Store the country selection message ID and chat ID to edit later
+    country_msg_id = query.message.message_id
+    country_chat_id = query.message.chat_id
+
     await edit_or_send(query, f'{emoji_tag("5976826804931928647", "⏳")}', parse_mode='HTML', context=context, auto_delete=False)
     await asyncio.sleep(1)
+
     num_req = int(get_setting('num_req', 3))
     numbers = get_numbers_from_stock(country, service, num_req)
+
     if not numbers:
         await query.answer("No numbers available for this country/service!", show_alert=True)
-        await edit_or_send(query, "Select a Country:", reply_markup=countries_for_service_keyboard(service), context=context, auto_delete=False)
+        # Refresh the country selection message with updated stock (which is still 0)
+        new_kb = countries_for_service_keyboard(service)
+        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+        try:
+            await context.bot.edit_message_text(chat_id=country_chat_id, message_id=country_msg_id, text=apply_emojis(new_text), reply_markup=new_kb, parse_mode='HTML')
+        except:
+            pass
         return
+
+    # Update stock in the country selection message
+    new_kb = countries_for_service_keyboard(service)
+    new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+    try:
+        await context.bot.edit_message_text(chat_id=country_chat_id, message_id=country_msg_id, text=apply_emojis(new_text), reply_markup=new_kb, parse_mode='HTML')
+    except Exception as e:
+        print(f"Failed to update country stock: {e}")
+
+    # Allocate numbers to user
     old_data = last_activation_data.get(user_id)
     if old_data:
         old_msg_id = old_data[3]
@@ -3224,16 +3249,20 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
             await context.bot.delete_message(chat_id=user_id, message_id=old_msg_id)
         except:
             pass
+
     expiry = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for number in numbers:
         db_exec('''INSERT INTO numbers (user_id, number, country, service, assigned_date, status, expiry_time)
                    VALUES (?, ?, ?, ?, ?, 'active', ?)''',
                 (user_id, number, country, service, now_str, expiry))
+
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
+
     # Update cooldown in DB
     db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
+
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
@@ -3261,11 +3290,13 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
-        await query.answer(f"⌚ Wait {remaining}s To Get Number ✅", show_alert=True)
+        await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
         return
+
     await query.answer("Getting next numbers...")
     await edit_or_send(query, f'{emoji_tag("5976826804931928647", "⏳")}', parse_mode='HTML', context=context, auto_delete=False)
     await asyncio.sleep(1)
+
     result = db_fetch_one("SELECT current_country, current_service FROM users WHERE user_id = ?", (user_id,))
     country = service = None
     if result and result[0]:
@@ -3274,16 +3305,24 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         fallback = db_fetch_one("SELECT country, service FROM numbers WHERE user_id = ? ORDER BY assigned_date DESC LIMIT 1", (user_id,))
         if fallback:
             country, service = fallback
+
     if not country or not service:
         await query.answer("Please select a service and country first!", show_alert=True)
         await edit_or_send(query, "Select a Service:", reply_markup=services_keyboard(), context=context, auto_delete=False)
         return
+
     num_req = int(get_setting('num_req', 3))
     numbers = get_numbers_from_stock(country, service, num_req)
+
     if not numbers:
         await query.answer(f"No more {country} {service} numbers!", show_alert=True)
-        await edit_or_send(query, f"Select a Country for {service}:", reply_markup=countries_for_service_keyboard(service), context=context, auto_delete=False)
+        # Update country selection with fresh stock
+        new_kb = countries_for_service_keyboard(service)
+        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+        # Try to find the country selection message from last_activation_data? Not possible, so we'll send a new message.
+        await edit_or_send(query, new_text, reply_markup=new_kb, parse_mode='HTML', context=context, auto_delete=False)
         return
+
     old_data = last_activation_data.get(user_id)
     if old_data:
         old_msg_id = old_data[3]
@@ -3291,16 +3330,20 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.delete_message(chat_id=user_id, message_id=old_msg_id)
         except:
             pass
+
     expiry = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for number in numbers:
         db_exec('''INSERT INTO numbers (user_id, number, country, service, assigned_date, status, expiry_time)
                    VALUES (?, ?, ?, ?, ?, 'active', ?)''',
                 (user_id, number, country, service, now_str, expiry))
+
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
+
     # Update cooldown in DB
     db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
+
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
@@ -4182,6 +4225,9 @@ def get_numbers_from_stock(country, service, count):
     for num in numbers:
         db_exec("UPDATE available_numbers SET used = 1 WHERE number = ? AND country = ? AND service = ?",
                 (num, country, service))
+    # Decrement stock count in countries table
+    db_exec("UPDATE countries SET stock = stock - ? WHERE name = ? AND service = ?",
+            (len(numbers), country, service))
     return numbers
 
 def delete_country_stock(country, service):
