@@ -306,6 +306,48 @@ def safe_icon(emoji_id):
         return emoji_id
     return None
 
+# ================= GLOBAL SAFE SENDER (FIXED) =================
+async def safe_send(bot, chat_id, text, reply_markup=None, parse_mode='HTML'):
+    """
+    Send a message safely. If an invalid custom emoji ID is encountered,
+    strip <tg-emoji> tags and remove icon_custom_emoji_id from buttons,
+    then resend with HTML parse_mode (so bold/italic still work).
+    """
+    try:
+        text = apply_emojis(text)
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "invalid custom emoji identifier" in str(e):
+            # Strip <tg-emoji> tags but keep other HTML
+            cleaned_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text, flags=re.DOTALL)
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
+            # Remove icon_custom_emoji_id from inline buttons
+            if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
+                new_keyboard = []
+                for row in reply_markup.inline_keyboard:
+                    new_row = []
+                    for btn in row:
+                        if isinstance(btn, dict):
+                            btn_dict = {k: v for k, v in btn.items() if k != 'icon_custom_emoji_id'}
+                            new_btn = InlineKeyboardButton(**btn_dict)
+                        else:
+                            new_btn = InlineKeyboardButton(
+                                text=btn.text,
+                                callback_data=btn.callback_data if hasattr(btn, 'callback_data') else None,
+                                url=btn.url if hasattr(btn, 'url') else None,
+                                copy_text=btn.copy_text if hasattr(btn, 'copy_text') else None,
+                                style=btn.style if hasattr(btn, 'style') else None,
+                            )
+                        new_row.append(new_btn)
+                    new_keyboard.append(new_row)
+                reply_markup = InlineKeyboardMarkup(new_keyboard)
+
+            # Send again with HTML parse_mode (so bold/italic remain)
+            await bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            raise
+
 # ================= EMOJIS (PREMIUM – from constants) =================
 WELCOME_WAVE = "5199885118214255386"
 WELCOME_THINK = "5314563983422798645"
@@ -3049,7 +3091,7 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
 
-# ================= /testgroup COMMAND =================
+# ================= /testgroup COMMAND (UPDATED) =================
 async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
@@ -3078,21 +3120,19 @@ async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     test_number = country_code + local_part
     test_otp = ''.join(random.choices('0123456789', k=6))
     test_message = "Your verification code is: " + test_otp
-    entry = {
-        "number": test_number,
-        "otp": test_otp,
-        "service": service,
-        "country_code": iso2,
-        "country": country_name,
-        "message": test_message,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
     grp_text, grp_kb = generate_otp_display(service, test_number, test_message, detect_language(test_message))
     success_count = 0
     failed_groups = []
     for gid in GROUP_IDS:
         try:
-            await context.bot.send_message(chat_id=gid, text=apply_emojis(grp_text), reply_markup=InlineKeyboardMarkup(grp_kb['inline_keyboard']), parse_mode='HTML')
+            # Use safe_send to handle emoji errors gracefully
+            await safe_send(
+                context.bot,
+                gid,
+                grp_text,
+                InlineKeyboardMarkup(grp_kb['inline_keyboard']),
+                parse_mode='HTML'
+            )
             success_count += 1
         except Exception as e:
             failed_groups.append(f"{gid} ({str(e)})")
@@ -6621,49 +6661,8 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
     semaphore = asyncio.Semaphore(50)
     new_otp_count = 0
 
-    # ==== UPDATED safe_send_message with fallback and dict handling ====
-    async def safe_send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
-        async with semaphore:
-            try:
-                text = apply_emojis(text)
-                await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-            except BadRequest as e:
-                if "invalid custom emoji identifier" in str(e):
-                    # Strip <tg-emoji> tags
-                    cleaned_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text, flags=re.DOTALL)
-                    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-
-                    # Remove icon_custom_emoji_id from inline buttons
-                    if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
-                        new_keyboard = []
-                        for row in reply_markup.inline_keyboard:
-                            new_row = []
-                            for btn in row:
-                                # Handle both dict and InlineKeyboardButton objects
-                                if isinstance(btn, dict):
-                                    # Create a new dict without icon_custom_emoji_id
-                                    btn_dict = {k: v for k, v in btn.items() if k != 'icon_custom_emoji_id'}
-                                    new_btn = InlineKeyboardButton(**btn_dict)
-                                else:
-                                    # btn is an InlineKeyboardButton object
-                                    new_btn = InlineKeyboardButton(
-                                        text=btn.text,
-                                        callback_data=btn.callback_data if hasattr(btn, 'callback_data') else None,
-                                        url=btn.url if hasattr(btn, 'url') else None,
-                                        copy_text=btn.copy_text if hasattr(btn, 'copy_text') else None,
-                                        style=btn.style if hasattr(btn, 'style') else None,
-                                        # icon_custom_emoji_id is intentionally omitted
-                                    )
-                                new_row.append(new_btn)
-                            new_keyboard.append(new_row)
-                        reply_markup = InlineKeyboardMarkup(new_keyboard)
-
-                    await bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=reply_markup, parse_mode=None)
-                else:
-                    raise
-
-    # ==== UPDATED process_single_otp with deduplication ====
-    seen_otps = set()   # local dedup within same batch
+    # --- Deduplication set (per batch) ---
+    seen_otps = set()
 
     async def process_single_otp(otp_entry):
         nonlocal new_otp_count
@@ -6683,27 +6682,34 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
         if not number:
             return 0
 
-        # --- DEDUPLICATE WITHIN SAME BATCH ---
+        # Deduplicate within the same batch
         key = f"{number}_{otp_code}"
         if key in seen_otps:
             return 0
         seen_otps.add(key)
 
-        # --- CHECK IF ALREADY SENT TO GROUP ---
+        # Check if already sent globally
         existing_global = db_fetch_one(
             "SELECT id FROM otps WHERE number=? AND otp=? LIMIT 1",
             (number, otp_code)
         )
         if existing_global:
-            return 0  # already sent, no log
+            return 0  # already sent
 
-        # Send to OTP groups (only if not seen before)
+        # ---- Send to OTP groups (only if new) ----
         if group_ids:
             try:
                 lang = detect_language(message)
                 grp_text, grp_kb = generate_otp_display(service_name, number, message, lang)
                 for gid in group_ids:
-                    await safe_send_message(gid, grp_text, InlineKeyboardMarkup(grp_kb['inline_keyboard']))
+                    # Use the global safe_send function (defined at the top)
+                    await safe_send(
+                        bot,
+                        gid,
+                        grp_text,
+                        InlineKeyboardMarkup(grp_kb['inline_keyboard']),
+                        parse_mode='HTML'
+                    )
             except Exception as e:
                 print(f"❌ Group send failed for {key}: {e}")
 
@@ -6711,7 +6717,7 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
         db_exec("INSERT INTO otps (number, otp, message, timestamp, forwarded, user_id) VALUES (?,?,?,?,1,0)",
                 (number, otp_code, message, otp_timestamp_str))
 
-        # Now handle user DM (existing logic unchanged)
+        # ---- Handle user DM (unchanged) ----
         clean_number = number.replace('+', '')
         local_tasks = []
         if clean_number in num_map:
@@ -6751,7 +6757,7 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
                 new_bal = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (uid,))[0] or 0.0
                 lang_user = detect_language(message)
                 user_text, user_kb = deliver_to_inbox(uid, service_name, number, message, new_bal, reward, lang_user)
-                local_tasks.append(safe_send_message(uid, user_text, user_kb))
+                local_tasks.append(safe_send(bot, uid, user_text, user_kb, parse_mode='HTML'))
                 new_otp_count += 1
 
         if local_tasks:
