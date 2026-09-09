@@ -228,7 +228,7 @@ def resolve_country(country=None, code=None, number=None):
     # Fallback
     return {"code": "", "iso": "XX", "flag": "🏳️", "name": "Unknown", "emoji_id": ""}
 
-# ================= MANUAL SERVICE EMOJI LOOKUP (CASE-INSENSITIVE + CONTEXT) =================
+# ================= MANUAL SERVICE EMOJI LOOKUP =================
 def get_manual_service_emoji(service_name, for_group=False):
     """
     Check database for manually set service emoji.
@@ -251,7 +251,7 @@ def get_manual_service_emoji(service_name, for_group=False):
             return row[0]
     return None
 
-# ================= FIXED: get_premium_app with context =================
+# ================= FIXED: get_premium_app with fallback emoji for manual overrides =================
 def get_premium_app(service_name, for_group=False):
     """
     Return premium app info.
@@ -263,10 +263,16 @@ def get_premium_app(service_name, for_group=False):
     """
     if not service_name:
         service_name = "Other"
-    # 1. Manual override (Service Manager) – for both group and bot
+    # 1. Manual override
     manual_id = get_manual_service_emoji(service_name, for_group=for_group)
     if manual_id:
-        return {"name": service_name, "emoji": "", "id": manual_id}
+        # Find a fallback emoji character from PREMUAM_APPS or use "📱"
+        fallback = "📱"
+        for name, info in PREMIUM_APPS.items():
+            if name.lower() == service_name.lower():
+                fallback = info.get("emoji", "📱")
+                break
+        return {"name": service_name, "emoji": fallback, "id": manual_id}
     # 2. PREMIUM_APPS
     key = service_name.strip()
     if key in PREMIUM_APPS:
@@ -349,7 +355,7 @@ def safe_icon(emoji_id):
         return emoji_id
     return None
 
-# ================= GLOBAL SAFE SENDER (FIXED) =================
+# ================= GLOBAL SAFE SENDER =================
 async def safe_send(bot, chat_id, text, reply_markup=None, parse_mode='HTML'):
     """
     Send a message safely. If an invalid custom emoji ID is encountered,
@@ -1376,7 +1382,7 @@ def stock_management_menu_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(rows)
 
-# ================= AIR CONTROL KEYBOARDS (copied from test.py) =================
+# ================= AIR CONTROL KEYBOARDS =================
 def air_control_keyboard():
     min_w = get_setting('min_withdraw', '10.0')
     ref_r = get_setting('refer_reward', '0.2')
@@ -1473,7 +1479,7 @@ def manage_w_methods_keyboard():
                                       icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))])
     return InlineKeyboardMarkup(rows)
 
-# ================= OTP GROUP KEYBOARD (copied from test.py) =================
+# ================= OTP GROUP KEYBOARD =================
 def get_otp_group_keyboard():
     rows = []
 
@@ -1539,7 +1545,7 @@ def get_otp_group_keyboard():
 
     return InlineKeyboardMarkup(rows)
 
-# ================= FORCE JOIN KEYBOARD (copied from test.py) =================
+# ================= FORCE JOIN KEYBOARD =================
 def get_force_join_keyboard():
     rows = []
 
@@ -1605,12 +1611,10 @@ def get_back_only_keyboard():
                                                        icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))]])
 
 # ================= NATIVE SELECTION REPLY KEYBOARD HELPER =================
-# REMOVED BACK BUTTON from ReplyKeyboardMarkup
 def selection_reply_keyboard(button_text: str, request_id: int, is_channel: bool = False) -> ReplyKeyboardMarkup:
     request_chat = KeyboardButtonRequestChat(request_id=request_id, chat_is_channel=is_channel)
     keyboard = [
         [KeyboardButton(button_text, request_chat=request_chat)],
-        # BACK button removed
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -1866,7 +1870,7 @@ async def show_get_number(update: Update, context, user_id, first_name):
     else:
         await send_clean_message(update, context, user_id, text, reply_markup=services_keyboard(), parse_mode='HTML', auto_delete=False)
 
-# ================= BALANCE & WITHDRAW (FIXED) =================
+# ================= BALANCE & WITHDRAW =================
 async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE = None):
     ensure_user(user_id, update.effective_user.username, update.effective_user.first_name)
     user = db_fetch_one("SELECT first_name, balance, withdrawn, total_otp FROM users WHERE user_id = ?", (user_id,))
@@ -1906,7 +1910,6 @@ async def show_balance(update: Update, user_id, context: ContextTypes.DEFAULT_TY
         if context:
             await send_clean_message(update, context, user_id, text, reply_markup=kb, parse_mode='HTML', auto_delete=False)
 
-# LOW BALANCE POPUP FIX: show_alert=True
 async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE = None):
     ensure_user(user_id, update.effective_user.username, update.effective_user.first_name)
     balance = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (user_id,))
@@ -1922,7 +1925,6 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
             await update.answer(popup_text, show_alert=True)
             return
         else:
-            # Fallback: send as message (should not happen for callback)
             await reply_or_edit(update, popup_text, context=context, auto_delete=False)
             return
     methods = get_setting('w_methods', [])
@@ -1943,8 +1945,7 @@ async def show_withdraw(update: Update, user_id, context: ContextTypes.DEFAULT_T
 async def user_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    method = query.data[14:]  # "user_withdraw_{method}"
-    # Check W.GROUP immediately
+    method = query.data[14:]
     w_group = get_setting("w_group", "")
     if not w_group:
         await query.answer("WITHDRAW IS NOW NOT AVAILABLE 🫡", show_alert=True)
@@ -1993,7 +1994,6 @@ async def handle_withdraw_text(update: Update, context: ContextTypes.DEFAULT_TYP
     if amount > balance:
         await update.message.reply_text(f"❌ Insufficient balance! You only have ${balance:.2f}.", reply_markup=get_back_only_keyboard())
         return True
-    # Store withdrawal request in database (pending)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db_exec("INSERT INTO withdraw_requests (user_id, amount, method, account_number, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
             (user_id, amount, method, "", now_str))
@@ -2021,9 +2021,7 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
     amount = float(parts[4])
     request_id = int(parts[5])
     account_number = update.message.text.strip()
-    # Update request with account number
     db_exec("UPDATE withdraw_requests SET account_number = ? WHERE id = ?", (account_number, request_id))
-    # Deduct balance atomically when request is created
     user = db_fetch_one("SELECT balance FROM users WHERE user_id=?", (user_id,))
     if not user or user[0] < amount:
         await update.message.reply_text("❌ Insufficient balance.", reply_markup=get_back_only_keyboard())
@@ -2054,19 +2052,16 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
                                      icon_custom_emoji_id=safe_icon(DANGER_EMOJI))
             ]
         ])
-        # Send to W.GROUP
         try:
             await context.bot.send_message(chat_id=int(w_group), text=apply_emojis(w_msg), reply_markup=w_markup, parse_mode='HTML')
         except Exception as e:
             print(f"Failed to send to w_group: {e}")
-        # Send to all admins
         admins = db_fetch_all("SELECT user_id FROM admins")
         for (admin_id,) in admins:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=apply_emojis(w_msg), reply_markup=w_markup, parse_mode='HTML')
             except Exception as e:
                 print(f"Failed to send to admin {admin_id}: {e}")
-    # FIX: User confirmation message with success emoji and bold heading
     success_msg = (
         f"<tg-emoji emoji-id=\"5420396762189831222\">🆕</tg-emoji> <b>WITHDRAW REQUEST SUBMITTED</b>\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -2086,14 +2081,12 @@ async def handle_withdraw_account(update: Update, context: ContextTypes.DEFAULT_
     del user_states[user_id]
     return True
 
-# ================= ADMIN WITHDRAW HANDLERS (FIXED) =================
 async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query is None:
         return
     user_id = query.from_user.id
     data = query.data
-    # Permission: any admin can approve/cancel
     if not is_admin(user_id):
         await query.answer("🫵 YOU ARE NOT A ADMIN 🫅 \n ACCESS DENIED ❌", show_alert=True)
         return
@@ -2108,7 +2101,6 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("Invalid request ID.", show_alert=True)
         return
 
-    # Fetch request
     req = db_fetch_one("SELECT id, user_id, amount, method, account_number, status FROM withdraw_requests WHERE id = ?", (request_id,))
     if not req:
         await query.answer("Request not found.", show_alert=True)
@@ -2119,33 +2111,29 @@ async def admin_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if action == "approve":
-        # Update status atomically
         db_exec("UPDATE withdraw_requests SET status = 'approved', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
         affected = c.rowcount
         if affected == 0:
             await query.answer("Already processed.", show_alert=True)
             return
-        # Balance already deducted, just notify user
         await context.bot.send_message(req_user_id, f"{emoji_tag(WALLET_EMOJI, '💰')} YOUR BALANCE IS SENDED SUCCESSFULLY TO YOUR WALLET  {emoji_tag(SUCCESS_EMOJI, '✅')}", parse_mode='HTML')
         btn_text = "APPROVED BY ADMIN"
         btn_style = KBS.SUCCESS
         btn_icon = SUCCESS_EMOJI
-    else:  # reject / cancle
+    else:
         db_exec("UPDATE withdraw_requests SET status = 'rejected', updated_at = ?, processed_by = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, request_id))
         affected = c.rowcount
         if affected == 0:
             await query.answer("Already processed.", show_alert=True)
             return
-        # Refund the deducted amount
         db_exec("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, req_user_id))
         await context.bot.send_message(req_user_id, f"{emoji_tag(WALLET_EMOJI, '💰')} YOUR WITHDRAWAL REQUEST IS CANCELLED BY ADMIN {emoji_tag(DANGER_EMOJI, '❌')}", parse_mode='HTML')
         btn_text = "CANCLED BY ADMIN"
         btn_style = KBS.DANGER
         btn_icon = DANGER_EMOJI
 
-    # Update the original message to disable buttons
     try:
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(btn_text, callback_data="ignore_action", style=btn_style, icon_custom_emoji_id=safe_icon(btn_icon))
@@ -2662,7 +2650,6 @@ async def handle_chat_shared(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = shared.chat_id
     state = admin_panel_state.get(user_id)
 
-    # Send generic success message first
     await update.message.reply_text(
         "✅ <b>Successfully Selected!</b>",
         reply_markup=bottom_menu_keyboard(user_id)
@@ -2819,14 +2806,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user_id):
         return False
 
-    # Remove old manual selection states – they are now handled by chat_shared
     if state in ["waiting_fj_channel", "waiting_fj_group", "waiting_otp_group", "waiting_w_group"]:
         admin_panel_state.pop(user_id, None)
         await update.message.reply_text("Selection cancelled.")
         await admin_panel_menu(update, user_id, context)
         return True
 
-    # Existing admin text handlers
     if state == "waiting_broadcast":
         msg = update.message
         users = db_fetch_all("SELECT user_id FROM users WHERE banned=0")
@@ -2903,9 +2888,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return True
             name, code, iso, payout = parts[0], parts[1], parts[2].upper(), parts[3]
             emoji_id = parts[4] if len(parts) >= 5 else ""
-            # If emoji_id is empty, try to resolve from COUNTRY_CODE_MAP and GLOBAL_EMOJI
             if not emoji_id:
-                # Try to find the flag from code
                 for c_code, info in COUNTRY_CODE_MAP.items():
                     if c_code == code.lstrip('+') or info["name"].lower() == name.lower():
                         flag = info["flag"]
@@ -2913,7 +2896,6 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if eid:
                             emoji_id = eid
                         break
-                # If still empty, try by name
                 if not emoji_id:
                     for c_code, info in COUNTRY_CODE_MAP.items():
                         if info["name"].lower() == name.lower():
@@ -2945,7 +2927,6 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             code, iso, payout = parts[0], parts[1].upper(), parts[2]
             emoji_id = parts[3] if len(parts) >= 4 else ""
             if not emoji_id:
-                # try to resolve
                 for c_code, info in COUNTRY_CODE_MAP.items():
                     if c_code == code.lstrip('+') or info["iso"] == iso:
                         flag = info["flag"]
@@ -3105,7 +3086,6 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     user_id = query.from_user.id
     if await ban_check(update, context):
         return
-    # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
         await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
@@ -3122,7 +3102,6 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     if not numbers:
         await query.answer("No numbers available right now!", show_alert=True)
         return
-    # Update cooldown in DB
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
     old_data = last_activation_data.get(user_id)
@@ -3144,7 +3123,7 @@ async def stock_get_number_callback(update: Update, context: ContextTypes.DEFAUL
     sent_msg = await query.message.reply_text(apply_emojis(msg), reply_markup=kb, parse_mode='HTML')
     last_activation_data[user_id] = (country, service, numbers, sent_msg.message_id)
 
-# ================= /testgroup COMMAND (UPDATED) =================
+# ================= /testgroup COMMAND =================
 async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
@@ -3178,7 +3157,6 @@ async def testgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed_groups = []
     for gid in GROUP_IDS:
         try:
-            # Use safe_send to handle emoji errors gracefully
             await safe_send(
                 context.bot,
                 gid,
@@ -3249,7 +3227,6 @@ async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.delete()
     except:
         pass
-    # Send main menu with keyboard
     await send_main_menu(query, context, user_id)
 
 async def toggle_cc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3290,7 +3267,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
 
-    # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
         await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
@@ -3304,7 +3280,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
     country = parts[1]
     service = parts[2]
 
-    # Store the country selection message ID and chat ID to edit later
     country_msg_id = query.message.message_id
     country_chat_id = query.message.chat_id
 
@@ -3316,7 +3291,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
 
     if not numbers:
         await query.answer("No numbers available for this country/service!", show_alert=True)
-        # Refresh the country selection message with updated stock (which is still 0)
         new_kb = countries_for_service_keyboard(service)
         new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
         try:
@@ -3325,7 +3299,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
             pass
         return
 
-    # Update stock in the country selection message
     new_kb = countries_for_service_keyboard(service)
     new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
     try:
@@ -3333,7 +3306,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         print(f"Failed to update country stock: {e}")
 
-    # Allocate numbers to user
     old_data = last_activation_data.get(user_id)
     if old_data:
         old_msg_id = old_data[3]
@@ -3352,7 +3324,6 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
 
-    # Update cooldown in DB
     db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
 
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
@@ -3379,7 +3350,6 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     user_id = query.from_user.id
     first_name = query.from_user.first_name or "User"
-    # Cooldown check
     remaining = check_cooldown(user_id)
     if remaining > 0:
         await query.answer(f"⏳ Wait {remaining}s To Get Number ✅", show_alert=True)
@@ -3408,10 +3378,8 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if not numbers:
         await query.answer(f"No more {country} {service} numbers!", show_alert=True)
-        # Update country selection with fresh stock
         new_kb = countries_for_service_keyboard(service)
         new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
-        # Try to find the country selection message from last_activation_data? Not possible, so we'll send a new message.
         await edit_or_send(query, new_text, reply_markup=new_kb, parse_mode='HTML', context=context, auto_delete=False)
         return
 
@@ -3433,7 +3401,6 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     db_exec('''UPDATE users SET current_number = ?, current_country = ?, current_service = ?, number_expiry = ?
                WHERE user_id = ?''', (numbers[0], country, service, expiry, user_id))
 
-    # Update cooldown in DB
     db_exec("UPDATE users SET last_number_time = ? WHERE user_id = ?", (now_str, user_id))
 
     msg, kb = format_numbers_message(country, service, numbers, user_id=user_id)
@@ -3492,7 +3459,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "exit":
         await exit_admin_callback_query(query, user_id, context.bot)
     elif action == "back":
-        # Return to admin panel
         admin_panel_state[user_id] = "main"
         await edit_or_send(query, "ADMIN PANEL\n\nDeveloper: 𝐖𝐀 𝐂𝐑𝐄𝐀𝐓𝐈𝐎𝐍 𝐑 𝐁𝐎𝐓\n\nSelect an action below:", reply_markup=admin_panel_keyboard(), context=context, auto_delete=False)
     elif action == "stock_management":
@@ -3833,7 +3799,6 @@ async def force_join_add_select(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = [
         [KeyboardButton("📢 SELECT CHANNEL", request_chat=channel_request)],
         [KeyboardButton("👥 SELECT GROUP", request_chat=group_request)],
-        # BACK button removed
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -3900,7 +3865,6 @@ async def otp_select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= BACK HANDLER FOR SELECTION KEYBOARD =================
 async def handle_back_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the BACK button in selection keyboards."""
     if not update.message or not update.message.text:
         return False
     if update.message.text == "🔙 BACK":
@@ -4313,11 +4277,9 @@ def get_numbers_from_stock(country, service, count):
     if not rows:
         return []
     numbers = [row[0] for row in rows]
-    # Mark as used
     for num in numbers:
         db_exec("UPDATE available_numbers SET used = 1 WHERE number = ? AND country = ? AND service = ?",
                 (num, country, service))
-    # Decrement stock count in countries table
     db_exec("UPDATE countries SET stock = stock - ? WHERE name = ? AND service = ?",
             (len(numbers), country, service))
     return numbers
@@ -4328,7 +4290,7 @@ def delete_country_stock(country, service):
     db_exec("UPDATE countries SET stock = 0 WHERE name = ? AND service = ?", (country, service))
     return True
 
-# ================= CURL PARSER (unchanged) =================
+# ================= CURL PARSER =================
 import re
 import json
 from urllib.parse import urlparse, parse_qs
@@ -4467,7 +4429,7 @@ def build_request_from_curl(parsed: dict, placeholders: dict = None) -> dict:
             "data": data, "base_url": parsed.get("base_url", ""), "endpoint": parsed.get("endpoint", ""),
             "placeholders": placeholders}
 
-# ================= API ADD STEPS (unchanged) =================
+# ================= API ADD STEPS =================
 STEP_ORDER = [
     "api_add_name", "api_add_base_url", "api_add_endpoint", "api_add_token",
     "api_add_interval", "api_add_otp_list_path", "api_add_number_path",
@@ -4889,7 +4851,7 @@ async def api_add_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("✏️ Edit mode: You can re-enter each step. Press SKIP to keep current value.", reply_markup=admin_cancel_keyboard())
     await api_add_step(update, context, user_id, "api_add_name")
 
-# ================= API POLLING (WITH RECOVERY) =================
+# ================= API POLLING =================
 async def poll_single_api_curl_based(api_id: int):
     if api_id not in polling_cycle_counts:
         polling_cycle_counts[f"api_{api_id}"] = 0
@@ -5115,7 +5077,7 @@ async def api_choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await cdr_add_start(update, context, user_id)
 
-# ================= CDR PANEL MANAGEMENT (unchanged) =================
+# ================= CDR PANEL MANAGEMENT =================
 async def _solve_captcha(page) -> str | None:
     body_text = await page.locator("body").inner_text()
     match = re.search(r"(\d+)\s*([\+\-])\s*(\d+)", body_text)
@@ -6707,14 +6669,12 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
         clean = num.replace('+', '')
         num_map.setdefault(clean, []).append((uid, country, assigned))
     
-    # FIX: Always fetch fresh group IDs from DB
     group_ids = get_otp_group_ids()
     print(f"📤 OTP processing: group_ids = {group_ids}")
     
     semaphore = asyncio.Semaphore(50)
     new_otp_count = 0
 
-    # --- Deduplication set (per batch) ---
     seen_otps = set()
 
     async def process_single_otp(otp_entry):
@@ -6735,19 +6695,17 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
         if not number:
             return 0
 
-        # Deduplicate within the same batch
         key = f"{number}_{otp_code}"
         if key in seen_otps:
             return 0
         seen_otps.add(key)
 
-        # Check if already sent globally
         existing_global = db_fetch_one(
             "SELECT id FROM otps WHERE number=? AND otp=? LIMIT 1",
             (number, otp_code)
         )
         if existing_global:
-            return 0  # already sent
+            return 0
 
         # ---- Send to OTP groups (only if new) ----
         if group_ids:
@@ -6755,7 +6713,6 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
                 lang = detect_language(message)
                 grp_text, grp_kb = generate_otp_display(service_name, number, message, lang)
                 for gid in group_ids:
-                    # Use the global safe_send function (defined at the top)
                     await safe_send(
                         bot,
                         gid,
@@ -6766,11 +6723,10 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
             except Exception as e:
                 print(f"❌ Group send failed for {key}: {e}")
 
-        # Insert into DB (user_id=0 for group) after sending
         db_exec("INSERT INTO otps (number, otp, message, timestamp, forwarded, user_id) VALUES (?,?,?,?,1,0)",
                 (number, otp_code, message, otp_timestamp_str))
 
-        # ---- Handle user DM (unchanged) ----
+        # ---- Handle user DM ----
         clean_number = number.replace('+', '')
         local_tasks = []
         if clean_number in num_map:
@@ -6815,7 +6771,7 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
 
         if local_tasks:
             await asyncio.gather(*local_tasks)
-        return 1  # count as processed
+        return 1
 
     tasks = [process_single_otp(otp) for otp in otps_list]
     results = await asyncio.gather(*tasks)
@@ -6934,11 +6890,6 @@ async def handle_edit_value_text(update: Update, context: ContextTypes.DEFAULT_T
 
 # ================= MISSING FUNCTION: load_numbers_from_file =================
 def load_numbers_from_file(file_path, filename, force_country=None, force_service=None):
-    """
-    Load phone numbers from a text file.
-    Detects country and service from filename if not forced.
-    Returns (count, country, service).
-    """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f if line.strip()]
@@ -6948,7 +6899,6 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
 
     numbers = []
     for line in lines:
-        # Remove any non-digit except '+'
         num = re.sub(r'[^0-9+]', '', line)
         if num:
             numbers.append(num)
@@ -6956,10 +6906,8 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
     if not numbers:
         return 0, "", ""
 
-    # Determine country and service from filename
     base = os.path.basename(filename)
-    base = os.path.splitext(base)[0]  # remove extension
-    # Try to split by '_' or '-'
+    base = os.path.splitext(base)[0]
     parts = re.split(r'[_-]', base)
     if len(parts) >= 2:
         country_candidate = parts[0].strip()
@@ -6968,11 +6916,9 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
         country_candidate = base
         service_candidate = ""
 
-    # Use forced values if provided
     if force_country:
         country = force_country
     else:
-        # Try to match country_candidate with COUNTRY_CODE_MAP (by name or iso)
         found = None
         for code, info in COUNTRY_CODE_MAP.items():
             if info['name'].lower() == country_candidate.lower() or info['iso'].lower() == country_candidate.lower():
@@ -6981,19 +6927,17 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
         if found:
             country = found
         else:
-            # fallback: try to detect from first number's prefix
             first_num = numbers[0].replace('+', '')
             for code, info in COUNTRY_CODE_MAP.items():
                 if first_num.startswith(code):
                     country = info['name']
                     break
             else:
-                country = country_candidate  # use as-is
+                country = country_candidate
 
     if force_service:
         service = force_service
     else:
-        # Try to match service_candidate with PREMIUM_APPS keys
         found = None
         for app_name in PREMIUM_APPS.keys():
             if app_name.lower() == service_candidate.lower():
@@ -7004,12 +6948,10 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
         else:
             service = service_candidate if service_candidate else "Other"
 
-    # Insert into available_numbers and update countries stock
     country = country.strip()
     service = service.strip()
     added = 0
     for num in numbers:
-        # Check if already exists
         existing = db_fetch_one("SELECT id FROM available_numbers WHERE number = ? AND country = ? AND service = ? AND used = 0",
                                 (num, country, service))
         if existing:
@@ -7018,7 +6960,6 @@ def load_numbers_from_file(file_path, filename, force_country=None, force_servic
                 (country, service, num))
         added += 1
 
-    # Update countries table: insert or update stock
     db_exec("INSERT OR IGNORE INTO countries (name, service, flag, stock) VALUES (?, ?, ?, 0)",
             (country, service, country))
     db_exec("UPDATE countries SET stock = stock + ? WHERE name = ? AND service = ?",
