@@ -1265,7 +1265,7 @@ def bottom_menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(BTN_GET_NUMBER, style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("GET_NUMBER", ""))),
-            KeyboardButton(BTN_BALANCE, style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon("5312123810638483121")),
+            KeyboardButton(BTN_BALANCE, style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon("5262606754725771771")),
         ],
         [
             KeyboardButton(BTN_INVITE, style=KBS.SUCCESS, icon_custom_emoji_id=safe_icon("5384394344859974865")),
