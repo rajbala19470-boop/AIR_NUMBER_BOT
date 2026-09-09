@@ -23,7 +23,7 @@ from playwright.async_api import async_playwright
 from langdetect import detect
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8769374062:AAHTIxugF2XHffjlg6p2Xrd4Br-OUezroro"
+BOT_TOKEN = "8807752409:AAGvQUU9v4VETyPp9EEnB5Qbd4PrYjTfglQ"
 SUPER_ADMIN_IDS = [8744359777]
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 BOT_USERNAME = ""
@@ -251,7 +251,7 @@ def get_manual_service_emoji(service_name, for_group=False):
             return row[0]
     return None
 
-# ================= FIXED: get_premium_app with fallback emoji for manual overrides =================
+# ================= get_premium_app with priority and fallback =================
 def get_premium_app(service_name, for_group=False):
     """
     Return premium app info.
@@ -401,7 +401,8 @@ async def safe_send(bot, chat_id, text, reply_markup=None, parse_mode='HTML'):
 WELCOME_WAVE = "5199885118214255386"
 WELCOME_THINK = "5314563983422798645"
 INBOX_EMOJI = "5472239203590888751"
-MONEY_EMOJI = "5805602131176069048"
+MONEY_EMOJI = "5805602131176069048"   # Existing Money Emoji
+TAKA_EMOJI = "6267068789146260253"    # New Money Emoji for DM OTP
 MAIN_MENU_EMOJI = "6267186570034419608"   # UPDATED but will be replaced with plain text
 HEADER_EMOJI_1 = "6282641460093260838"
 HEADER_EMOJI_2 = "6267315814190290529"
@@ -421,7 +422,7 @@ DOWNLOAD_EMOJI = "5229010262111041311"
 REFRESH_EMOJI = "5229111790842952353"
 CLOSE_EMOJI = "5438541186539232243"
 BACK_EMOJI = "5267490665117275176"
-COPY_EMOJI = "6206420230269310869"
+COPY_EMOJI = "6206420230269310869"     # DM_OTP emoji (same as copy icon)
 NUMBER_EMOJI = "6129815674614189175"
 CHANNEL_EMOJI = "6204010762206189094"
 HIDDEN_EMOJI = "6235253239080555488"
@@ -934,21 +935,41 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     }
     return text, markup
 
+# ================= NEW DM OTP FORMAT (only this function changed) =================
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
-    """Bot DM message – uses for_group=False so only Service Manager emojis apply."""
-    service_html, srv_eid = get_service_info_html(service_name, for_group=False)
+    """
+    DM OTP message format with new layout.
+    {Service_emoji} {SERVICE_NAME}
+     ┃  {TAKA_EMOJI} + {ADDED_$}
+     ┗━➢ {FLAG_EMOJI} + {Number}
+
+    [{DM_OTP} {otp}]
+    """
+    # Get service emoji and name (for_group=False -> only Service Manager overrides)
+    service_html, _ = get_service_info_html(service_name, for_group=False)
     clean_raw_number = str(raw_number).lstrip('+')
     flag_html = country_flag_emoji_tag(number=raw_number)
-    text = (
-        f"— — — — — — — — — —\n"
-        f"<blockquote>{service_html} <code>+{clean_raw_number}</code></blockquote>\n"
-        f"<blockquote><tg-emoji emoji-id=\"5420323438508155202\">➕</tg-emoji> <b>ADDED</b>  ➜ ${reward:.2f}</blockquote>\n"
-        f"<blockquote><tg-emoji emoji-id=\"5190899075968441286\">💳</tg-emoji> <b>BALANCE</b> ➜ ${current_balance:.2f}</blockquote>\n"
-        f"— — — — — — — — — —"
-    )
     otp = extract_otp_code(msg_text)
-    markup = {"inline_keyboard": [[{"text": f"{otp}", "icon_custom_emoji_id": COPY_EMOJI, "copy_text": {"text": otp}, "style": "success"}]]}
-    return text, InlineKeyboardMarkup(markup['inline_keyboard'])
+
+    # Build new format
+    text = (
+        f"{service_html}\n"
+        f" ┃  {emoji_tag(TAKA_EMOJI, '💰')} + <b>${reward:.2f}</b>\n"
+        f" ┗━➢ {flag_html} +<b>{clean_raw_number}</b>"
+    )
+
+    # OTP copy button with DM_OTP emoji
+    button_emoji = emoji_tag(COPY_EMOJI, "")  # DM_OTP emoji
+    button_text = f"{button_emoji} {otp}"
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            text=button_text,
+            copy_text=CopyTextButton(text=otp),
+            style=KBS.SUCCESS,
+            icon_custom_emoji_id=COPY_EMOJI
+        )
+    ]])
+    return text, markup
 
 def get_otp_reward(service_name):
     rates = get_setting("otp_service_rates", {})
