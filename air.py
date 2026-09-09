@@ -228,22 +228,46 @@ def resolve_country(country=None, code=None, number=None):
     # Fallback
     return {"code": "", "iso": "XX", "flag": "🏳️", "name": "Unknown", "emoji_id": ""}
 
-# ================= FIXED: get_premium_app (always returns "Other" with ID) =================
+# ================= MANUAL SERVICE EMOJI LOOKUP =================
+def get_manual_service_emoji(service_name):
+    """Check database for manually set service emoji (Service Manager or /setservice)."""
+    # Check services table (Service Manager -> Set Service Emoji)
+    row = db_fetch_one("SELECT emoji_id FROM services WHERE name = ? AND emoji_id != ''", (service_name,))
+    if row and row[0]:
+        return row[0]
+    # Check group_emojis table (/setservice command)
+    row = db_fetch_one("SELECT emoji_id FROM group_emojis WHERE type='service' AND key=?", (service_name.lower(),))
+    if row and row[0]:
+        return row[0]
+    return None
+
+# ================= FIXED: get_premium_app with priority and fallback =================
 def get_premium_app(service_name):
-    """Return premium app info for a service name."""
+    """Return premium app info. Priority: manual override > PREMIUM_APPS > fallback (id=None)."""
     if not service_name:
-        return PREMIUM_APPS.get("Other", {"name": "Other", "emoji": "📱", "id": ""})
+        service_name = "Other"
+    # Check manual override
+    manual_id = get_manual_service_emoji(service_name)
+    if manual_id:
+        return {"name": service_name, "emoji": "", "id": manual_id}
+    # Check PREMIUM_APPS
     key = service_name.strip()
     if key in PREMIUM_APPS:
         return PREMIUM_APPS[key]
     for name, info in PREMIUM_APPS.items():
         if name.lower() == key.lower():
             return info
-    # If not found, return "Other" with its premium emoji ID
-    return PREMIUM_APPS.get("Other", {"name": "Other", "emoji": "📱", "id": ""})
+    # Not found: fallback with no emoji
+    return {"name": service_name, "emoji": None, "id": None}
 
 def service_premium_tag(service_name):
-    return emoji_tag(get_premium_app(service_name).get("id", ""), get_premium_app(service_name).get("emoji", "📱"))
+    """Return premium tag for a service (emoji or #SERVICE_NAME fallback)."""
+    app = get_premium_app(service_name)
+    emoji_id = app.get("id", "")
+    if emoji_id:
+        return emoji_tag(emoji_id, app.get("emoji", "📱"))
+    else:
+        return f'#{service_name.upper()}'
 
 def country_flag_emoji_tag(country=None, code=None, number=None):
     info = resolve_country(country, code, number)
@@ -807,6 +831,7 @@ def detect_service(message_text, raw_sid=""):
     return "Other"
 
 def get_service_info_html(service_name):
+    """Return HTML for service name with emoji or #SERVICE fallback."""
     app = get_premium_app(service_name)
     emoji_id = app.get("id", "")
     normal_emoji = app.get("emoji", "📱")
@@ -814,7 +839,10 @@ def get_service_info_html(service_name):
     if short_name == "FACEBOOK": short_name = "FB"
     if short_name == "WHATSAPP": short_name = "WS"
     if short_name == "INSTAGRAM": short_name = "IG"
-    return f'<tg-emoji emoji-id="{emoji_id}">{normal_emoji}</tg-emoji> <b>{html.escape(short_name)}</b>', emoji_id
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{emoji_id}">{normal_emoji}</tg-emoji> <b>{html.escape(short_name)}</b>', emoji_id
+    else:
+        return f'#{html.escape(short_name)}', None
 
 def extract_otp_code(message_text):
     otp = extract_otp_from_message(message_text)
@@ -831,13 +859,17 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     app = get_premium_app(service_name)
     service_emoji = app.get("emoji", "📱")
     service_emoji_id = app.get("id", "")
+    if service_emoji_id:
+        service_emoji_part = f'<tg-emoji emoji-id="{service_emoji_id}">{service_emoji}</tg-emoji>'
+    else:
+        service_emoji_part = f'#{service_name.upper()}'
 
     first4 = clean_number[:4] if len(clean_number) >= 4 else clean_number
     last3 = clean_number[-3:] if len(clean_number) >= 3 else clean_number
 
     text = (
         f"{flag_html}<b>{iso}</b> | "
-        f'<tg-emoji emoji-id="{service_emoji_id}">{service_emoji}</tg-emoji> | '
+        f"{service_emoji_part} | "
         f"+<b>{first4}</b><tg-emoji emoji-id=\"{HIDDEN_EMOJI}\">🔹</tg-emoji><b>{last3}</b> | "
         f'<tg-emoji emoji-id="{MESSAGE_EMOJI}">✉️</tg-emoji> <b>{lang}</b>'
     )
