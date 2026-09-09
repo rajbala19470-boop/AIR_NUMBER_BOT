@@ -1,5 +1,6 @@
+"""
 # THIS PREMIUM BOT IS DEVELOPED BY RAKESH DEV
-# TG: @SR_ADMIN_RAKESH
+# TG: @SR_ADMIN_RAKESH"""
 
 import asyncio, json, os, re, sqlite3, threading, tempfile, zipfile, shutil, sys, logging, math, time
 from datetime import datetime, timedelta
@@ -423,7 +424,7 @@ REFRESH_EMOJI = "5229111790842952353"
 CLOSE_EMOJI = "5438541186539232243"
 BACK_EMOJI = "5267490665117275176"
 COPY_EMOJI = "6206420230269310869"     # DM_OTP emoji (same as copy icon)
-NUMBER_EMOJI = "6129815674614189175"
+NUMBER_EMOJI = "5262606754725771771"
 CHANNEL_EMOJI = "6204010762206189094"
 HIDDEN_EMOJI = "6235253239080555488"
 MESSAGE_EMOJI = "6235307467337635626"
@@ -6793,7 +6794,10 @@ async def process_otps(otps_list, context: ContextTypes.DEFAULT_TYPE = None, bot
                     except:
                         pass
 
-                reward = get_otp_reward(service_name)
+                # FIX: Use country payout as reward (instead of service rate)
+                country_payout_str = get_country_info(country).get('payout', '0.001$')
+                reward = parse_payout(country_payout_str)
+
                 db_exec("UPDATE users SET balance = balance + ?, total_otp = total_otp + 1 WHERE user_id = ?",
                         (reward, uid))
                 db_exec("INSERT INTO otps (number, otp, message, timestamp, forwarded, user_id) VALUES (?,?,?,?,1,?)",
