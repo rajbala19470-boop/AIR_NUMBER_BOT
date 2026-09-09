@@ -228,17 +228,19 @@ def resolve_country(country=None, code=None, number=None):
     # Fallback
     return {"code": "", "iso": "XX", "flag": "🏳️", "name": "Unknown", "emoji_id": ""}
 
+# ================= FIXED: get_premium_app (always returns "Other" with ID) =================
 def get_premium_app(service_name):
     """Return premium app info for a service name."""
     if not service_name:
-        return {"name": "Other", "emoji": "📱", "id": ""}
+        return PREMIUM_APPS.get("Other", {"name": "Other", "emoji": "📱", "id": ""})
     key = service_name.strip()
     if key in PREMIUM_APPS:
         return PREMIUM_APPS[key]
     for name, info in PREMIUM_APPS.items():
         if name.lower() == key.lower():
             return info
-    return {"name": key, "emoji": "📱", "id": ""}
+    # If not found, return "Other" with its premium emoji ID
+    return PREMIUM_APPS.get("Other", {"name": "Other", "emoji": "📱", "id": ""})
 
 def service_premium_tag(service_name):
     return emoji_tag(get_premium_app(service_name).get("id", ""), get_premium_app(service_name).get("emoji", "📱"))
