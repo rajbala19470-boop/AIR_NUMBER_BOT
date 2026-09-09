@@ -935,7 +935,7 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     }
     return text, markup
 
-# ================= NEW DM OTP FORMAT (only this function changed) =================
+# ================= NEW DM OTP FORMAT (replaced function) =================
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
     """
     DM OTP message format with new layout.
@@ -945,30 +945,45 @@ def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balanc
 
     [{DM_OTP} {otp}]
     """
-    # Get service emoji and name (for_group=False -> only Service Manager overrides)
-    service_html, _ = get_service_info_html(service_name, for_group=False)
-    clean_raw_number = str(raw_number).lstrip('+')
-    flag_html = country_flag_emoji_tag(number=raw_number)
-    otp = extract_otp_code(msg_text)
+    # 1. Service emoji & full name
+    app = get_premium_app(service_name, for_group=False)
+    service_emoji_tag = emoji_tag(app.get("id", ""), app.get("emoji", "📱"))
+    service_name_upper = service_name.upper()
 
-    # Build new format
+    # 2. Flag emoji from number
+    info = resolve_country(number=raw_number)
+    flag_emoji_tag = emoji_tag(info.get("emoji_id", ""), info.get("flag", "🏳️"))
+
+    # 3. Clean number (strip leading '+', we add our own)
+    clean_number = str(raw_number).lstrip('+')
+
+    # 4. Reward with full precision (no rounding)
+    # Format with 10 decimals, then strip trailing zeros and dot if needed
+    reward_str = f"{reward:.10f}".rstrip('0').rstrip('.')
+    amount_display = f"${reward_str}"   # includes dollar sign
+
+    # 5. Extract OTP from message
+    otp = extract_otp_code(msg_text)
+    if not otp:
+        otp = "N/A"
+
+    # 6. Build message with alignment
     text = (
-        f"{service_html}\n"
-        f" ┃  {emoji_tag(TAKA_EMOJI, '💰')} + <b>${reward:.2f}</b>\n"
-        f" ┗━➢ {flag_html} +<b>{clean_raw_number}</b>"
+        f"{service_emoji_tag} <b>{service_name_upper}</b>\n"
+        f" ┃  {emoji_tag(TAKA_EMOJI, '💰')} <b>+ {amount_display}</b>\n"
+        f" ┗━➢ {flag_emoji_tag} <b>+{clean_number}</b>\n"
+        f"\n"
     )
 
-    # OTP copy button with DM_OTP emoji
-    button_emoji = emoji_tag(COPY_EMOJI, "")  # DM_OTP emoji
-    button_text = f"{button_emoji} {otp}"
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            text=button_text,
-            copy_text=CopyTextButton(text=otp),
-            style=KBS.SUCCESS,
-            icon_custom_emoji_id=COPY_EMOJI
-        )
-    ]])
+    # 7. Create copy button with premium emoji as icon, and text as [OTP]
+    button = InlineKeyboardButton(
+        text=f"[{otp}]",
+        copy_text=CopyTextButton(text=otp),
+        style=KBS.SUCCESS,
+        icon_custom_emoji_id=COPY_EMOJI
+    )
+    markup = InlineKeyboardMarkup([[button]])
+
     return text, markup
 
 def get_otp_reward(service_name):
@@ -4986,7 +5001,7 @@ async def poll_single_api_curl_based(api_id: int):
                 else:
                     error_msg = f"HTTP {status}"
                     db_exec("INSERT INTO api_logs (api_id, timestamp, status, message, otp_count) VALUES (?, ?, 'error', ?, 0)",
-                            (api_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), error_msg))
+                            (api_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), error_msg, 0))
                     db_exec("UPDATE api_keys SET error_count = error_count + 1 WHERE id = ?", (api_id,))
                     consecutive_failures += 1
                     print(f"[API: {config.get('panel_name', api_id)}] 🔄 Polling cycle #{cycle} – ❌ {error_msg}")
