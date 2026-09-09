@@ -228,41 +228,58 @@ def resolve_country(country=None, code=None, number=None):
     # Fallback
     return {"code": "", "iso": "XX", "flag": "🏳️", "name": "Unknown", "emoji_id": ""}
 
-# ================= MANUAL SERVICE EMOJI LOOKUP =================
-def get_manual_service_emoji(service_name):
-    """Check database for manually set service emoji (Service Manager or /setservice)."""
-    # Check services table (Service Manager -> Set Service Emoji)
-    row = db_fetch_one("SELECT emoji_id FROM services WHERE name = ? AND emoji_id != ''", (service_name,))
-    if row and row[0]:
-        return row[0]
-    # Check group_emojis table (/setservice command)
-    row = db_fetch_one("SELECT emoji_id FROM group_emojis WHERE type='service' AND key=?", (service_name.lower(),))
-    if row and row[0]:
-        return row[0]
+# ================= MANUAL SERVICE EMOJI LOOKUP (CASE-INSENSITIVE + CONTEXT) =================
+def get_manual_service_emoji(service_name, for_group=False):
+    """
+    Check database for manually set service emoji.
+    - for_group=True: check both services (Service Manager) and group_emojis (/setservice)
+    - for_group=False: check only services (Service Manager)
+    Returns emoji_id or None.
+    """
+    if not service_name:
+        return None
+    service_lower = service_name.lower()
+    # Check services table (Service Manager) first (case-insensitive)
+    services = db_fetch_all("SELECT name, emoji_id FROM services WHERE emoji_id != ''")
+    for name, eid in services:
+        if name.lower() == service_lower:
+            return eid
+    # If for_group, also check group_emojis (/setservice)
+    if for_group:
+        row = db_fetch_one("SELECT emoji_id FROM group_emojis WHERE type='service' AND key=?", (service_lower,))
+        if row and row[0]:
+            return row[0]
     return None
 
-# ================= FIXED: get_premium_app with priority and fallback =================
-def get_premium_app(service_name):
-    """Return premium app info. Priority: manual override > PREMIUM_APPS > fallback (id=None)."""
+# ================= FIXED: get_premium_app with context =================
+def get_premium_app(service_name, for_group=False):
+    """
+    Return premium app info.
+    Priority:
+      - Manual override (Service Manager) always first.
+      - If for_group=True, also check /setservice override.
+      - Then PREMUAM_APPS.txt.
+      - Fallback: return None as emoji_id -> display #{service_name}
+    """
     if not service_name:
         service_name = "Other"
-    # Check manual override
-    manual_id = get_manual_service_emoji(service_name)
+    # 1. Manual override (Service Manager) – for both group and bot
+    manual_id = get_manual_service_emoji(service_name, for_group=for_group)
     if manual_id:
         return {"name": service_name, "emoji": "", "id": manual_id}
-    # Check PREMIUM_APPS
+    # 2. PREMIUM_APPS
     key = service_name.strip()
     if key in PREMIUM_APPS:
         return PREMIUM_APPS[key]
     for name, info in PREMIUM_APPS.items():
         if name.lower() == key.lower():
             return info
-    # Not found: fallback with no emoji
+    # 3. Not found: fallback with no emoji
     return {"name": service_name, "emoji": None, "id": None}
 
-def service_premium_tag(service_name):
+def service_premium_tag(service_name, for_group=False):
     """Return premium tag for a service (emoji or #SERVICE_NAME fallback)."""
-    app = get_premium_app(service_name)
+    app = get_premium_app(service_name, for_group=for_group)
     emoji_id = app.get("id", "")
     if emoji_id:
         return emoji_tag(emoji_id, app.get("emoji", "📱"))
@@ -830,9 +847,9 @@ def detect_service(message_text, raw_sid=""):
             return service
     return "Other"
 
-def get_service_info_html(service_name):
+def get_service_info_html(service_name, for_group=False):
     """Return HTML for service name with emoji or #SERVICE fallback."""
-    app = get_premium_app(service_name)
+    app = get_premium_app(service_name, for_group=for_group)
     emoji_id = app.get("id", "")
     normal_emoji = app.get("emoji", "📱")
     short_name = service_name.upper()
@@ -849,6 +866,7 @@ def extract_otp_code(message_text):
     return otp if otp else "N/A"
 
 def generate_otp_display(service_name, raw_number, message_text, lang):
+    """Group OTP message – uses for_group=True so /setservice works."""
     clean_number = str(raw_number).lstrip('+')
     country_info = resolve_country(number=raw_number)
     iso = country_info.get("iso", "XX")
@@ -856,7 +874,7 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     name = country_info.get("name", "Unknown")
     flag_html = emoji_tag(country_info.get("emoji_id", ""), flag)
 
-    app = get_premium_app(service_name)
+    app = get_premium_app(service_name, for_group=True)  # group context
     service_emoji = app.get("emoji", "📱")
     service_emoji_id = app.get("id", "")
     if service_emoji_id:
@@ -911,7 +929,8 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
     return text, markup
 
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
-    service_html, srv_eid = get_service_info_html(service_name)
+    """Bot DM message – uses for_group=False so only Service Manager emojis apply."""
+    service_html, srv_eid = get_service_info_html(service_name, for_group=False)
     clean_raw_number = str(raw_number).lstrip('+')
     flag_html = country_flag_emoji_tag(number=raw_number)
     text = (
@@ -1099,7 +1118,7 @@ DEFAULT_EMOJIS = {
 }
 
 def service_emoji_tag(service_name: str) -> str:
-    return service_premium_tag(service_name)
+    return service_premium_tag(service_name, for_group=False)
 
 # ================= FORMAT NUMBERS =================
 def format_numbers_message(country, service, numbers, user_id=None, first_name=None):
@@ -1112,7 +1131,7 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
             remove_cc = row[0] or 0
     flag_html = country_flag_emoji_tag(country=country)
     country_code = get_country_info(country).get("code", "")
-    service_eid = get_premium_app(service).get("id", "")
+    service_eid = get_premium_app(service, for_group=False).get("id", "")
     phone_icon_id = "5197474438970363734"
     header = (
         f'{emoji_tag(HEADER_EMOJI_1, "⚙️")} <b>THIS IS YOUR</b> '
@@ -1160,7 +1179,7 @@ def format_numbers_message(country, service, numbers, user_id=None, first_name=N
 
 def stock_added_message(country, service, count):
     flag_html = country_flag_emoji_tag(country=country)
-    svc_eid = get_premium_app(service).get("id", "")
+    svc_eid = get_premium_app(service, for_group=False).get("id", "")
     payout = get_country_info(country).get("payout", "0.001$")
     EMOJI_EYE = "4958617898751886363"
     EMOJI_PACKAGE = "5463412319948148591"
@@ -1230,7 +1249,7 @@ def services_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row = []
     for s in services:
-        app = get_premium_app(s[0])
+        app = get_premium_app(s[0], for_group=False)
         btn = InlineKeyboardButton(
             text=s[1],
             callback_data=f"svc_sel|{s[0]}",
@@ -1435,7 +1454,7 @@ def air_otp_control_keyboard():
                               icon_custom_emoji_id=safe_icon("5395444784611480792"))]
     ]
     for srv_name, rate in service_rates.items():
-        app = get_premium_app(srv_name)
+        app = get_premium_app(srv_name, for_group=False)
         rows.append([InlineKeyboardButton(f"Delete: {srv_name} ({rate})", callback_data=f"del_srv_rate_{srv_name}", style=KBS.DANGER,
                                           icon_custom_emoji_id=safe_icon(app.get("id", "")))])
     rows.append([InlineKeyboardButton("BACK", callback_data="admin_air_control", style=KBS.DANGER,
@@ -3261,7 +3280,7 @@ async def service_selection_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     service = query.data.split('|', 1)[1]
     db_exec("UPDATE users SET current_service = ? WHERE user_id = ?", (service, user_id))
-    text = f'{emoji_tag(CUSTOM_EMOJIS["SELECT_COUNTRY_PREFIX"], "🌍")} <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+    text = f'{emoji_tag(CUSTOM_EMOJIS["SELECT_COUNTRY_PREFIX"], "🌍")} <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
     await edit_or_send(query, text, reply_markup=countries_for_service_keyboard(service), parse_mode='HTML', context=context, auto_delete=False)
 
 async def country_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3299,7 +3318,7 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("No numbers available for this country/service!", show_alert=True)
         # Refresh the country selection message with updated stock (which is still 0)
         new_kb = countries_for_service_keyboard(service)
-        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
         try:
             await context.bot.edit_message_text(chat_id=country_chat_id, message_id=country_msg_id, text=apply_emojis(new_text), reply_markup=new_kb, parse_mode='HTML')
         except:
@@ -3308,7 +3327,7 @@ async def country_selection_callback(update: Update, context: ContextTypes.DEFAU
 
     # Update stock in the country selection message
     new_kb = countries_for_service_keyboard(service)
-    new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+    new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
     try:
         await context.bot.edit_message_text(chat_id=country_chat_id, message_id=country_msg_id, text=apply_emojis(new_text), reply_markup=new_kb, parse_mode='HTML')
     except Exception as e:
@@ -3391,7 +3410,7 @@ async def next_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer(f"No more {country} {service} numbers!", show_alert=True)
         # Update country selection with fresh stock
         new_kb = countries_for_service_keyboard(service)
-        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service)}'
+        new_text = f'🌍 <b>Select country for {html.escape(service.upper())}</b> {service_premium_tag(service, for_group=False)}'
         # Try to find the country selection message from last_activation_data? Not possible, so we'll send a new message.
         await edit_or_send(query, new_text, reply_markup=new_kb, parse_mode='HTML', context=context, auto_delete=False)
         return
@@ -3539,7 +3558,7 @@ async def stock_remove_confirm_callback(update: Update, context: ContextTypes.DE
     await query.answer()
     _, country, service = query.data.split('|')
     flag_html = country_flag_emoji_tag(country=country)
-    text = f'Do you want to remove all numbers for {flag_html} <b>{html.escape(country)}</b> with service {service_premium_tag(service)}?'
+    text = f'Do you want to remove all numbers for {flag_html} <b>{html.escape(country)}</b> with service {service_premium_tag(service, for_group=False)}?'
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("YES", callback_data=f"stock_remove_yes|{country}|{service}", style=KBS.SUCCESS, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("YES", "")))],
         [InlineKeyboardButton("NO", callback_data="stock_remove_no", style=KBS.DANGER, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("NO", "")))]
@@ -3582,7 +3601,7 @@ async def stock_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         for country, service, stock in rows:
             payout = get_country_info(country).get("payout", "0.001$")
             flag_html = country_flag_emoji_tag(country=country)
-            line = f'{service_premium_tag(service)}|{flag_html}<b>{html.escape(country)}</b>|<code>{payout}</code>|{stock}'
+            line = f'{service_premium_tag(service, for_group=False)}|{flag_html}<b>{html.escape(country)}</b>|<code>{payout}</code>|{stock}'
             lines.append(line)
         text = "\n".join(lines)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_stock_management", style=KBS.PRIMARY, icon_custom_emoji_id=safe_icon(CUSTOM_EMOJIS.get("BACK", "")))]])
@@ -3654,7 +3673,7 @@ async def show_admin_stats(update: Update, user_id, context: ContextTypes.DEFAUL
         text += f'\n\n{emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")} STOCK DETAILS {emoji_tag(CUSTOM_EMOJIS["PACKAGE"], "📦")}:\n'
         for name, service, stock_count in countries:
             flag_html = country_flag_emoji_tag(country=name)
-            text += f'In stock {flag_html} {name} — {service_premium_tag(service)}: {stock_count}\n'
+            text += f'In stock {flag_html} {name} — {service_premium_tag(service, for_group=False)}: {stock_count}\n'
     await reply_or_edit(update, text, reply_markup=admin_back_button(), parse_mode='HTML', context=context, auto_delete=False)
 
 async def show_delete_options(query, user_id, context: ContextTypes.DEFAULT_TYPE):
@@ -4005,7 +4024,7 @@ async def country_add_service_selection(update: Update, user_id, country_name, c
     services = db_fetch_all("SELECT name, display_name, emoji_id FROM services WHERE active = 1 ORDER BY name")
     rows = []
     for s in services:
-        app = get_premium_app(s[0])
+        app = get_premium_app(s[0], for_group=False)
         rows.append([InlineKeyboardButton(s[1], callback_data=f"cnt_add_svc|{country_name}|{s[0]}", style=KBS.PRIMARY,
                                           icon_custom_emoji_id=safe_icon(app.get("id", "")))])
     rows.append([InlineKeyboardButton("Skip", callback_data="admin_back", style=KBS.PRIMARY,
@@ -4182,7 +4201,7 @@ async def set_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     eid = parts[1].strip()
     db_exec("INSERT OR REPLACE INTO group_emojis (type, key, emoji_id) VALUES ('service', ?, ?)", (name, eid))
     DEFAULT_EMOJIS["services"][name.lower()] = eid
-    await update.message.reply_text(f"✅ Service emoji for {name} set to <code>{eid}</code>", parse_mode="HTML")
+    await update.message.reply_text(f"✅ Group service emoji for {name} set to <code>{eid}</code>", parse_mode="HTML")
     await send_with_main_keyboard(update, context, update.effective_user.id, "Main Menu")
 
 async def group_country_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
