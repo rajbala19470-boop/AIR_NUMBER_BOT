@@ -23,7 +23,7 @@ from playwright.async_api import async_playwright
 from langdetect import detect
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8807752409:AAGvQUU9v4VETyPp9EEnB5Qbd4PrYjTfglQ"
+BOT_TOKEN = "8979274305:AAEohpqkBNA2VNKL-J_AsFBPejTcD705qFE"
 SUPER_ADMIN_IDS = [8744359777]
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 BOT_USERNAME = ""
@@ -938,14 +938,14 @@ def generate_otp_display(service_name, raw_number, message_text, lang):
 # ================= NEW DM OTP FORMAT (replaced function) =================
 def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balance, reward, lang):
     """
-    DM OTP message format with new layout.
+    DM OTP message format:
     {Service_emoji} {SERVICE_NAME}
      ┃  {TAKA_EMOJI} + {ADDED_$}
      ┗━➢ {FLAG_EMOJI} + {Number}
 
-    [{DM_OTP} {otp}]
+    {DM_EMOJI} {OTP}   (inline copy button, KBS.SUCCESS)
     """
-    # 1. Service emoji & full name
+    # 1. Service emoji & full name (uppercase)
     app = get_premium_app(service_name, for_group=False)
     service_emoji_tag = emoji_tag(app.get("id", ""), app.get("emoji", "📱"))
     service_name_upper = service_name.upper()
@@ -958,7 +958,6 @@ def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balanc
     clean_number = str(raw_number).lstrip('+')
 
     # 4. Reward with full precision (no rounding)
-    # Format with 10 decimals, then strip trailing zeros and dot if needed
     reward_str = f"{reward:.10f}".rstrip('0').rstrip('.')
     amount_display = f"${reward_str}"   # includes dollar sign
 
@@ -967,7 +966,7 @@ def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balanc
     if not otp:
         otp = "N/A"
 
-    # 6. Build message with alignment
+    # 6. Build message with alignment and bold formatting
     text = (
         f"{service_emoji_tag} <b>{service_name_upper}</b>\n"
         f" ┃  {emoji_tag(TAKA_EMOJI, '💰')} <b>+ {amount_display}</b>\n"
@@ -975,12 +974,12 @@ def deliver_to_inbox(user_id, service_name, raw_number, msg_text, current_balanc
         f"\n"
     )
 
-    # 7. Create copy button with premium emoji as icon, and text as [OTP]
+    # 7. Create copy button: OTP as text, DM_EMOJI as icon, style SUCCESS
     button = InlineKeyboardButton(
-        text=f"[{otp}]",
+        text=otp,                          # only the digits
         copy_text=CopyTextButton(text=otp),
         style=KBS.SUCCESS,
-        icon_custom_emoji_id=COPY_EMOJI
+        icon_custom_emoji_id=COPY_EMOJI    # this is the DM_EMOJI
     )
     markup = InlineKeyboardMarkup([[button]])
 
